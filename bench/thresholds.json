@@ -1,0 +1,133 @@
+{
+  "_comment": [
+    "Regression thresholds enforced by `uv run python tasks.py bench` and by the CI bench job.",
+    "Latency limits are several times the numbers measured on the reference laptop, because",
+    "shared runners are noisy: they catch order-of-magnitude regressions, not small drifts.",
+    "Quality limits are tighter, because they are statements the README makes. Each one is set",
+    "so the measured value has clear headroom; see README Results for the measured numbers."
+  ],
+  "baseline": {
+    "conformal_quantile_5k_scores.p95_us": {
+      "max": 400
+    },
+    "cqr_scores_5k_rows.p95_us": {
+      "max": 200
+    },
+    "score_buffer_append_200.p95_us": {
+      "max": 800
+    },
+    "newsvendor_orders_5k_rows.p95_us": {
+      "max": 4000
+    },
+    "monitor_status_28_days.p95_us": {
+      "max": 1500
+    },
+    "aci_update.p95_us": {
+      "max": 20
+    },
+    "outlier_guard_check.p95_us": {
+      "max": 2000
+    },
+    "drift_check_10k_vs_10k.p95_us": {
+      "max": 30000
+    },
+    "redact_text_1kb.p95_us": {
+      "max": 3000
+    },
+    "rate_limiter_check.p95_us": {
+      "max": 50
+    }
+  },
+  "conformal": {
+    "coverage_80_slack": {
+      "min": 0
+    },
+    "coverage_95_slack": {
+      "min": 0
+    },
+    "mondrian_segment_gap": {
+      "max": 0.05
+    },
+    "mondrian_gap_improvement": {
+      "min": 0.02
+    },
+    "seconds": {
+      "max": 120
+    }
+  },
+  "shift": {
+    "error_80_aci_post": {
+      "max": 0.03
+    },
+    "error_95_aci_post": {
+      "max": 0.03
+    },
+    "aci_improvement_80": {
+      "min": 0.05
+    },
+    "aci_improvement_95": {
+      "min": 0.05
+    },
+    "coverage_80_aci_pre": {
+      "min": 0.7
+    },
+    "coverage_95_aci_pre": {
+      "min": 0.88
+    },
+    "aci_width_cost_80": {
+      "max": 2.5
+    },
+    "seconds": {
+      "max": 180
+    }
+  },
+  "monitor": {
+    "false_alarm_rate_per_run": {
+      "max": 0.05
+    },
+    "detection_delay_median_days": {
+      "max": 20
+    },
+    "detection_delay_p90_days": {
+      "max": 28
+    },
+    "undetected_rate": {
+      "max": 0.05
+    },
+    "seconds": {
+      "max": 120
+    }
+  },
+  "backtest": {
+    "mase_ratio_vs_snaive": {
+      "max": 0.95
+    },
+    "wspl_ratio_vs_snaive": {
+      "max": 0.95
+    },
+    "coverage_error_80_mondrian": {
+      "max": 0.03
+    },
+    "coverage_error_95_mondrian": {
+      "max": 0.025
+    },
+    "coverage_error_80_aci": {
+      "max": 0.03
+    },
+    "coverage_error_95_aci": {
+      "max": 0.025
+    },
+    "segment_gap_80_mondrian": {
+      "max": 0.04
+    },
+    "segment_gap_improvement_80": {
+      "min": 0.01
+    },
+    "newsvendor_cost_ratio": {
+      "max": 0.9
+    },
+    "wall_seconds": {
+      "max": 600
+    }
+  }
+}
