@@ -199,7 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--expect-head", default=None)
 
     demo = sub.add_parser("demo", help="run the offline demo")
-    demo.add_argument("--workdir", type=Path, default=Path("var/demo"))
+    demo.add_argument(
+        "--workdir",
+        type=Path,
+        default=Path("var/demo"),
+        help="recreated on every run, so the demo always starts from an empty state;"
+        " a directory the demo did not create is refused rather than deleted",
+    )
 
     args = parser.parse_args(argv)
     if args.command != "serve":
