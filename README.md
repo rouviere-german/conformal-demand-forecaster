@@ -122,17 +122,21 @@ reports how the frozen and adaptive intervals held up:
   "backtest_coverage_80_mondrian_pre_shift": 0.7991,
   "static_coverage_80_post_shift": 0.7815,
   "aci_coverage_80_post_shift": 0.8018,
+  "static_scored_post_shift": 1680,
+  "aci_scored_post_shift": 1680,
   "first_alarm_day_after_shift": 4,
   "quarantined_actuals": 3,
-  "pending_proposals": ["1eed551e59074c42a34cb03ec2250101", "60f98f15361c448ea73d9b5a2511896b"],
+  "pending_proposals": ["d0834d5845594adeb5863d88ddac75a2", "6c761a8b52bd4109996914150c75e05f"],
   "audit_chain_ok": true,
-  "seconds": 30.8
+  "seconds": 30.0
 }
 ```
 
-Frozen split conformal drifts to 78.2% coverage on a nominal 80% band; ACI holds 80.2%. The
-monitor fires four days after the shift, the injected spike is quarantined before it can move
-the calibration, and two proposals sit waiting for an operator.
+Frozen split conformal drifts to 78.2% coverage on a nominal 80% band; ACI holds 80.2%, both
+measured over the same 1,680 one-step intervals. The monitor fires four days after the shift, the
+injected spike is quarantined before it can move the calibration, and two proposals sit waiting
+for an operator. The workdir is recreated on every run, so running the command again prints the
+same numbers (only the proposal ids, the MLflow run id and the timing change).
 
 Run the pipeline yourself:
 
@@ -154,22 +158,25 @@ curl -s -H "X-API-Key: <key>" "http://127.0.0.1:8000/v1/forecast/S0001_ST01?hori
 ```json
 {
   "series_id": "S0001_ST01", "horizon": 7, "segment": "smooth",
-  "point": 3.956, "median": 3.344,
+  "point": 4.153, "median": 3.476,
   "intervals": {
-    "80": {"lower": 0.0, "upper": 9.731,  "alpha_effective": 0.1394, "saturated": false},
-    "95": {"lower": 0.0, "upper": 17.671, "alpha_effective": 0.0360, "saturated": false}
+    "80": {"lower": 0.304, "upper": 7.895,  "alpha_effective": 0.1394, "saturated": false},
+    "95": {"lower": 0.0,   "upper": 12.349, "alpha_effective": 0.0360, "saturated": false}
   },
-  "calibration_version": "d708ec0b7f21ee63...",
-  "model_version": "3a8d832089cde2ff...",
-  "order": {"fractile": 0.8, "quantity": 8.135, "units": 9}
+  "calibration_version": "3ccffd887904a283...",
+  "model_version": "4aad8e2ad96a5e8b...",
+  "order": {"fractile": 0.8, "fractile_served": 0.8, "fractile_clipped": false,
+            "quantity": 6.790, "units": 7}
 }
 ```
 
 That response is the demo's `example_forecast` field, from the same `get_forecast` call the
 route serves. `alpha_effective` is below its nominal 0.2 and 0.05 because ACI has widened this
 group after the shift; `saturated` says whether the calibration set was exhausted, which is when
-the guarantee stops being trustworthy. A forecast is only meaningful as the pair
-`(model_version, calibration_version)`.
+the guarantee stops being trustworthy. `fractile_clipped` says whether the cost ratio asked for a
+quantile beyond the outermost calibrated one (above 39:1 here, which saturates at the 97.5%
+bound), in which case `fractile_served` is the fractile the order was really read off. A forecast
+is only meaningful as the pair `(model_version, calibration_version)`.
 
 Containers: `docker compose up --build` runs the non-root, read-only image. The container build,
 smoke test, trivy scan and SBOM are verified in CI (`.github/workflows/ci.yml`, job `docker`);
@@ -177,14 +184,14 @@ they were not run locally while building this repository.
 
 ## Results
 
-All numbers below come from `bench/` scripts run on 2026-09-20 on Windows 10 (10.0.19045),
+All numbers below come from `bench/` scripts run on 2026-09-21 on Windows 10 (10.0.19045),
 Intel64 Family 6 Model 158, 6 logical CPUs, Python 3.12.14, CPU only. Each command is named next
 to its table; CI runs the same scripts against the looser limits in `bench/thresholds.json`.
 
 ### Accuracy and calibration
 
 `uv run python bench/bench_backtest.py --series 200` — 200 series, 1096 days, 12 rolling origins,
-28-day horizon, 67,200 rows scored against latent demand; 3m39s.
+28-day horizon, 67,200 rows scored against latent demand; 3m46s.
 
 | model | MASE | weighted scaled pinball | coverage 80% | coverage 95% |
 |---|---|---|---|---|
@@ -201,9 +208,16 @@ points short — which is exactly the failure this repository is about.
 | 80% | mondrian | 0.7999 | 17.05 | 24.55 | **0.0082** |
 | 80% | pooled | 0.8004 | 16.75 | 24.54 | 0.0249 |
 | 80% | aci | 0.7993 | 16.98 | 24.57 | 0.0021 |
+| 80% | raw (no conformal step) | 0.7774 | 16.71 | 24.54 | 0.0397 |
 | 95% | mondrian | 0.9532 | 24.66 | 35.67 | **0.0035** |
 | 95% | pooled | 0.9532 | 24.35 | 35.56 | 0.0188 |
 | 95% | aci | 0.9500 | 24.38 | 35.79 | 0.0007 |
+| 95% | raw (no conformal step) | 0.9008 | 21.35 | 37.50 | 0.0607 |
+
+`raw` is the same LightGBM quantile pair with no conformal step, which separates "the conformal
+layer helped" from "the gradient-boosted model was already good". It is 2.3 points short at 80%
+and 4.9 at 95%, with five to seventeen times the worst-segment gap; on the 20-series CI
+configuration, where each group has fewer calibration points, it is 12.5 points short at 80%.
 
 Pooled and Mondrian reach the same *average* coverage. The difference is the worst-segment gap:
 pooled leaves 2.5 points of spread between smooth and intermittent series at 80%, Mondrian leaves
@@ -212,7 +226,7 @@ pooled leaves 2.5 points of spread between smooth and intermittent series at 80%
 ### Behaviour under a regime shift
 
 `uv run python bench/bench_shift.py` — a model trained and frozen before a 2.2x level shift,
-scored over the following 200 days without retraining or recalibrating; 2.6s.
+scored over the following 200 days without retraining or recalibrating; 2.7s.
 
 | level | method | coverage before | coverage after | width after |
 |---|---|---|---|---|
@@ -221,15 +235,16 @@ scored over the following 200 days without retraining or recalibrating; 2.6s.
 | 95% | frozen split conformal | 0.9409 | **0.8038** | 29.75 |
 | 95% | ACI | 0.9381 | **0.9430** | 51.55 |
 
-The frozen calibration ends 11.5 and 14.6 points below nominal. ACI holds to within 1.0 and 0.7
-points, and pays for it with roughly 1.4x and 1.7x the width. The shipped `gamma = 0.08` comes
-from the measured trade-off (`--sweep`), not from taste
-([ADR 0003](docs/adr/0003-adaptive-conformal-inference.md)).
+The frozen calibration ends 11.5 and 14.6 points below nominal. ACI holds to within 1.03 and
+0.70 points, and pays for it with roughly 1.4x and 1.7x the width. The target this repository set
+itself was a long-run coverage error below 1 point: met at 95% (0.70pp), missed by 0.03pp at 80%
+in the shipped configuration. The shipped `gamma = 0.08` comes from the measured trade-off
+(`--sweep`), not from taste ([ADR 0003](docs/adr/0003-adaptive-conformal-inference.md)).
 
 ### The coverage guarantee, in isolation
 
 `uv run python bench/bench_conformal.py` — 500 independent exchangeable splits, 200 calibration
-points each; 1.7s.
+points each; 1.5s.
 
 | level | measured coverage | lower bound | upper bound |
 |---|---|---|---|
@@ -243,8 +258,8 @@ per-group calibration gives 0.796 and 0.822 (2.2 points).
 
 ### Monitor operating characteristic
 
-`uv run python bench/bench_monitor.py` — 500 stationary simulations and 500 breach simulations;
-6.2s.
+`uv run python bench/bench_monitor.py` — 500 stationary simulations, 500 breach simulations and
+500 over-coverage simulations; 10.7s.
 
 | metric | value |
 |---|---|
@@ -252,6 +267,13 @@ per-group calibration gives 0.796 and 0.822 (2.2 points).
 | detection delay after a genuine breach, median | 9 days |
 | detection delay, p90 | 12 days |
 | breaches never detected inside the window | 0.000 |
+| over-coverage false alarms (share of stationary runs) | 0.000 |
+| over-coverage detection delay (miss rate 0.05 at nominal 0.20), median | 13 days |
+| over-coverage never detected inside the window | 0.000 |
+
+The second arm tests the other tail: bands that are systematically wider than their level asks
+for are not a broken promise, but they are holding cost, and the newsvendor layer prices them.
+Only a breach opens a recalibration proposal; over-coverage is reported and counted.
 
 ### Decisions
 
@@ -269,12 +291,12 @@ Ordering at holding cost 1 and stockout cost 4, same 200-series backtest:
 
 | benchmark | p50 (us) | p95 (us) |
 |---|---:|---:|
-| conformal_quantile_5k_scores | 33.0 | 55.6 |
-| cqr_scores_5k_rows | 14.1 | 15.9 |
-| newsvendor_orders_5k_rows | 221.0 | 415.2 |
-| monitor_status_28_days | 76.0 | 142.5 |
+| conformal_quantile_5k_scores | 31.3 | 35.7 |
+| cqr_scores_5k_rows | 14.3 | 16.2 |
+| newsvendor_orders_5k_rows | 207.8 | 219.9 |
+| monitor_status_28_days | 148.1 | 191.1 |
 | aci_update | 0.6 | 0.7 |
-| outlier_guard_check | 108.4 | 211.1 |
+| outlier_guard_check | 106.4 | 129.9 |
 
 These are single-machine numbers for spotting regressions, not performance claims.
 
@@ -294,7 +316,16 @@ wrong calibration gives intervals that still look authoritative while mis-sizing
 - **Approval-gated promotion.** A coverage alarm opens a proposal; only an operator can approve
   it and only an approved proposal can be applied. Every transition is appended to a hash-chained
   audit log naming the actor, the approver and both calibration versions. Editing or deleting an
-  entry breaks the chain, and the writer refuses to append to a broken one.
+  entry breaks the chain, and the writer refuses to append to a broken one. The proposal file is
+  a projection of that chain, not the authority: before any transition the workflow replays the
+  chain for that proposal and refuses when the two disagree, so editing the file cannot resurrect
+  a rejected proposal or forge an approver.
+- **Append-only history.** An ingested day is bounded to the window the service actually serves
+  (panel start to the last observed day plus the forecast horizon) and rejected outside it, so a
+  far-dated record cannot inflate the (series x day) panel or leave readiness looking green from
+  an origin in the future. A day the panel already holds is never rewritten, never re-scored and
+  audited as a duplicate: recorded sales are the guard's own reference window and, after a
+  promotion, the calibration scores.
 - **Poisoning resistance.** Ingested actuals pass the data contract, then a robust median/MAD
   guard with a Poisson-like floor anchored on the 90th percentile. Quarantined values are stored
   for review and never reach the ACI state, the monitor or the panel. The guard is one-sided, so
@@ -304,7 +335,9 @@ wrong calibration gives intervals that still look authoritative while mis-sizing
 - **Artifact integrity.** The calibration version is the SHA-256 of its canonical record, which
   carries the digests of the score and reference files; all of them are verified on load, and an
   alpha state belonging to a different calibration is refused. Models are content-addressed in
-  the registry. Nothing is pickled: LightGBM text, JSON and npz with `allow_pickle=False`.
+  the registry. Nothing is pickled: LightGBM text, JSON and npz with `allow_pickle=False`. The
+  alpha state is the one file outside that chain, so it fails closed on a step size the
+  configuration did not choose.
 - **No lookahead.** A feature row may read the panel only up to its origin, plus the target day's
   known-in-advance covariates. Tests perturb the future for arbitrary origins and horizons and
   assert every row is unchanged — a leak here would inflate accuracy and silently destroy the
@@ -332,6 +365,12 @@ wrong calibration gives intervals that still look authoritative while mis-sizing
   measured improvements show the mechanism works, not what any real retailer's panel would give.
 - **Automatic recalibration.** Deliberate: promotion is the one irreversible action, so it waits
   for an operator. ACI covers the gap in the meantime.
+- **Weighted or localized conformal prediction.** The alternative to ACI under shift is to reweight
+  calibration scores (Barber et al. 2023). It is discussed and rejected with reasons in
+  [ADR 0003](docs/adr/0003-adaptive-conformal-inference.md), not implemented: it needs a weighting
+  rule per group, and ACI reaches long-run coverage here with one measured parameter.
+- **Acting on over-coverage.** The monitor reports its second arm and the newsvendor layer prices
+  the width, but nothing narrows the bands automatically; that stays an operator's decision.
 - **Tamper-proof audit.** The log is tamper-evident. Whoever can rewrite the whole file can
   rebuild the chain; publishing the head hash elsewhere would close that, and
   `audit verify --expect-head` exists for it.

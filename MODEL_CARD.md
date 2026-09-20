@@ -113,7 +113,13 @@ below was produced by a command in this repository, named next to it.
   probability of `alpha + tolerance` at significance 0.01 with at least 30 observations.
   Measured operating characteristic (`bench/bench_monitor.py`, 500 simulations each): false-alarm
   rate **0.4%** of stationary runs, median detection delay **9 days**, p90 **12 days**, and no
-  undetected breach.
+  undetected breach. Days are counted on the day they belong to, so a backfilled or horizon-dated
+  actual cannot empty the window the test runs on.
+- **Over-coverage arm:** the same test on the lower tail, against `max(alpha - 0.05, alpha / 2)`.
+  Bands that are systematically wider than their level asks for are holding cost rather than a
+  broken promise, so this arm is reported (`app_coverage_over_alarm_total`, the ingest summary)
+  and never opens a proposal. It fires on none of the 500 stationary runs and finds a
+  persistently over-covering stream in a median of 13 days.
 - **Retraining trigger:** a coverage alarm opens a recalibration proposal. ACI absorbs the shift
   automatically in the meantime; promoting a new calibration requires an operator approval and is
   hash-chain audited (ADR 0005).
@@ -139,6 +145,12 @@ below was produced by a command in this repository, named next to it.
    on fresh evidence. If the alarm returns within a window, the model — not the calibration — is
    probably the problem; retrain.
 
+An over-coverage finding (`app_coverage_over_alarm_total`, `over_coverage_alarms` in the ingest
+summary) is not part of this runbook: it opens nothing and nothing is broken. It says the bands
+for that segment and level are wider than the level asks for, which the newsvendor layer is
+paying for in holding cost. Recalibrating on fresh scores narrows them, and that is an operator's
+call to weigh against the width the shift response is buying.
+
 ## Ethical considerations
 
 The data is synthetic and contains no personal information, so the direct privacy risk is
@@ -160,7 +172,9 @@ visible rather than papered over.
   ACI handles slow or stepwise shift, not adversarial reordering.
 - **The newsvendor layer interpolates** the demand quantile function from five known points and
   clips outside them, so an extreme cost ratio saturates at the outermost conformalized bound
-  rather than extrapolating.
+  rather than extrapolating. With a 95% band that limit is a 39:1 stockout-to-holding ratio; past
+  it the order is the 97.5% quantile, and both the decision and the served payload say so
+  (`fractile_clipped`, `fractile_served`, `app_newsvendor_fractile_clipped_total`).
 - **Censoring is handled by exclusion, not by a censored-likelihood model.** Stockout days are
   dropped from training and calibration; a panel where most days are censored would leave too
   little to calibrate on.

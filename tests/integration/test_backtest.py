@@ -11,6 +11,7 @@ pipeline fails fast in CI.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -207,3 +208,20 @@ def test_the_row_frame_is_usable_for_ad_hoc_analysis(result) -> None:  # type: i
     assert expected <= set(rows.columns)
     assert rows["y_demand"].notna().all()
     assert (rows["mondrian_upper_80"] >= rows["mondrian_lower_80"]).all()
+
+
+def test_the_uncalibrated_model_is_scored_as_a_comparator(result) -> None:  # type: ignore[no-untyped-def]
+    """`raw` is the model's own quantile pair with no conformal step, scored alongside the rest.
+
+    It is what separates "the conformal layer helped" from "the gradient-boosted model was
+    already good". How much it helps is a measurement, not an invariant -- on a small stationary
+    panel the raw band can be the closer of the two -- so the numbers live in
+    ``bench/bench_backtest.py``; what has to hold here is that the row really is uncalibrated.
+    """
+    rows = result.rows
+    for tag, (lo_level, hi_level) in (("80", (0.100, 0.900)), ("95", (0.050, 0.950))):
+        assert rows[f"raw_lower_{tag}"].tolist() == rows[f"q{lo_level:.3f}"].tolist()
+        assert rows[f"raw_upper_{tag}"].tolist() == rows[f"q{hi_level:.3f}"].tolist()
+        assert not rows[f"raw_upper_{tag}"].equals(rows[f"mondrian_upper_{tag}"])
+        for metric in ("coverage", "width", "winkler", "segment_gap"):
+            assert np.isfinite(result.metrics[f"{metric}_{tag}_raw"])

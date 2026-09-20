@@ -20,7 +20,17 @@ The options were:
    is precisely when nobody is watching. It also does not tell anyone that coverage broke.
 2. **Weight recent calibration scores more heavily.** A reasonable heuristic, with no guarantee
    attached and another window-length parameter to tune.
-3. **Adaptive Conformal Inference** (Gibbs and Candes, NeurIPS 2021): treat the miscoverage
+3. **Weighted / localized conformal prediction** (Barber, Candes, Ramdas and Tibshirani, *Conformal
+   prediction beyond exchangeability*, Annals of Statistics 2023): keep the split conformal
+   construction but reweight the calibration scores, with a coverage gap bounded by the total
+   variation between the weighted and the true distribution. This is the principled form of
+   option 2 and the natural alternative to ACI for exactly this shift story. It was not chosen
+   here because the bound degrades with an unknown quantity (that total variation distance),
+   the weighting rule is another per-group choice to tune and defend, and it still reacts only as
+   fast as the window it weights -- while ACI reaches long-run coverage with one parameter this
+   repository could measure (the sweep below). Revisiting it is the obvious next step if
+   per-group weights can be learned rather than guessed.
+4. **Adaptive Conformal Inference** (Gibbs and Candes, NeurIPS 2021): treat the miscoverage
    level itself as a control variable and update it online from realized errors,
    `alpha_{t+1} = alpha_t + gamma (alpha - err_t)`.
 
@@ -65,4 +75,5 @@ visibly breathe. 0.08 sits where the error curve flattens, at about 3% more widt
   than being folded into the same mechanism.
 - The alpha state is mutable and lives outside the calibration version hash, in
   `alpha_state.json` bound to its calibration version. A state file from another calibration is
-  refused on load.
+  refused on load, and so is one written under a different `gamma`: the step size drives the whole
+  recursion, so restoring it silently would mean serving a controller nobody configured.

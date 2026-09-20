@@ -198,3 +198,12 @@ def test_no_pickle_is_used_by_the_artifact_files(tmp_path: Path) -> None:
     for name in (SCORES_NPZ, REFERENCE_NPZ):
         with np.load(tmp_path / name, allow_pickle=False) as data:
             assert len(data.files) > 0
+
+
+def test_an_alpha_state_written_under_another_gamma_is_refused(tmp_path: Path) -> None:
+    """The step size is not covered by the record digest, so the load fails closed on it."""
+    artifact = make_artifact()
+    artifact.save(tmp_path)
+    with pytest.raises(CalibrationIntegrityError, match="gamma"):
+        CalibrationArtifact.load(tmp_path, gamma=0.09)
+    assert CalibrationArtifact.load(tmp_path, gamma=artifact.aci.gamma).version == artifact.version

@@ -119,8 +119,12 @@ def test_a_clear_breach_raises_an_alarm() -> None:
     assert status.coverage < 1 - ALPHA - CONFIG.tolerance
 
 
-def test_over_coverage_never_alarms() -> None:
-    """The test is one-sided: intervals that are too wide are a cost problem, not an SLO breach."""
+def test_over_coverage_never_raises_the_breach_alarm() -> None:
+    """The breach arm is one-sided: too-wide intervals are a cost problem, not an SLO breach.
+
+    They are not ignored either -- the over-coverage arm below reports them -- but only a breach
+    opens a recalibration proposal.
+    """
     monitor = CoverageMonitor(CONFIG)
     day = feed(monitor, days=40, n=40, miss_rate=0.0)
     assert monitor.status("smooth", ALPHA, day).alarm is False

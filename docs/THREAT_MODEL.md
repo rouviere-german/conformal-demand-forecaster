@@ -27,7 +27,7 @@ follows is about protecting the calibration and the evidence trail around it.
 1. **Network to API.** Untrusted callers; authenticated by API key, authorized by role.
 2. **Ingestor to online state.** A valid ingestor key is semi-trusted: it can write actuals, but
    every value is contract-checked and screened before it can touch the ACI state or the monitor.
-3. **Disk to process.** Artifacts are re-read on every load and verified against recorded digests.
+3. **Disk to process.** Artifacts are re-read on every load and verified against recorded digests. Two files carry no digest of their own: `alpha_state.json`, which is bound to its calibration version and refused under a step size the configuration did not choose, and `proposals.json`, whose every transition is checked against the audit chain before it is allowed.
 4. **Operator to calibration.** The only path that can promote a calibration version, gated and
    audited.
 
@@ -48,6 +48,9 @@ follows is about protecting the calibration and the evidence trail around it.
 | Calibration scores edited on disk so intervals are silently wrong | `calibration.json` records the SHA-256 of `scores.npz` and is itself hashed into the calibration version; both are verified on load | `tests/unit/test_calibration_artifacts.py::test_tampering_with_the_scores_file_is_detected`, `tests/integration/test_runtime.py::test_a_tampered_calibration_file_refuses_to_load` |
 | Calibration record edited without rehashing | The version digest is recomputed from the canonical record and compared | `tests/unit/test_calibration_artifacts.py::test_editing_the_record_without_rehashing_is_detected` |
 | An alpha state file from another calibration is swapped in | `alpha_state.json` carries its calibration version and is refused if it does not match | `tests/unit/test_calibration_artifacts.py::test_an_alpha_state_from_another_calibration_is_refused` |
+| An alpha state is edited to run the recursion at another step size | The persisted gamma must equal the configured one; the load fails closed rather than adapting at a rate nobody chose | `tests/unit/test_aci.py::test_a_persisted_state_written_with_another_gamma_is_refused`, `tests/unit/test_calibration_artifacts.py::test_an_alpha_state_written_under_another_gamma_is_refused` |
+| The proposal file is edited to fake a decision | Every transition is replayed against the audit chain first and refused when the two disagree; the applied entry names the approver the chain recorded, not the one the file claims | `tests/unit/test_recalibration.py::test_a_rejected_proposal_cannot_be_resurrected_by_editing_the_file`, `tests/unit/test_recalibration.py::test_the_applied_entry_names_the_approver_from_the_chain` |
+| Recorded sales are rewritten through the ingest route | The panel is append-only: a day already stored is reported as a duplicate, audited and left untouched, so the guard's reference window and the calibration scores cannot be moved by a replay | `tests/unit/test_store.py::test_appending_a_day_that_is_already_stored_never_rewrites_it`, `tests/integration/test_runtime.py::test_replaying_a_stored_day_cannot_rewrite_it` |
 | Model artifact replaced | Models are registered content-addressed; the registry verifies digests on load | `tests/unit/test_ml_registry.py` |
 | Poisoned actuals shift the calibration and the ACI state | Contract validation, then a robust median/MAD guard with a Poisson-like floor; quarantined values are stored for review and never reach ACI, the monitor or the panel | `tests/unit/test_guard.py`, `tests/integration/test_runtime.py::test_quarantined_values_never_enter_the_panel` |
 | Poisoned history disarms the guard | The statistic is anchored on the median and the 90th percentile, so one spike cannot move it far enough to hide the next | `tests/unit/test_guard.py::test_one_poisoned_point_cannot_hide_the_next_spike`, `tests/unit/test_robustness.py::test_the_guard_rejects_a_sustained_poisoning_campaign` |
@@ -87,7 +90,9 @@ are units, prices and flags.
 | Invalid keys mint fresh rate-limit buckets | The limiter verifies the key first, so invalid keys share the caller's address bucket | `tests/integration/test_app.py::test_invalid_keys_cannot_mint_fresh_rate_limit_buckets` |
 | Oversized ingest batch exhausts memory | Body-size limit on declared and streamed bodies; `ingest_max_records` cap returning 413; per-record field bounds | `tests/integration/test_app.py::test_body_size_limit_applies_to_declared_and_streamed_bodies`, `tests/integration/test_service_api.py::test_an_empty_or_oversized_batch_is_rejected` |
 | Unbounded horizon or cost parameters | Query bounds on horizon and costs, plus a settings-level horizon check | `tests/integration/test_service_api.py::test_out_of_range_horizons_are_rejected_by_validation` |
-| Serving stale forecasts after a failed batch | `/readyz` fails when the latest origin is older than `freshness_max_days` | `tests/integration/test_service_api.py::test_readiness_fails_when_forecasts_go_stale` |
+| Serving stale forecasts after a failed batch | `/readyz` fails when the latest origin is older than `freshness_max_days`, and also when it lies ahead of the clock | `tests/integration/test_service_api.py::test_readiness_fails_when_forecasts_go_stale`, `tests/integration/test_runtime.py::test_a_future_dated_origin_is_not_reported_as_fresh` |
+| A far-dated actual inflates the panel every forecast rebuilds | Ingested days must lie within the served window (panel start to last observed day plus the forecast horizon) and are rejected outside it; the filled panel span is capped by `APP_PANEL_MAX_DAYS` | `tests/integration/test_runtime.py::test_a_far_future_dated_actual_is_rejected`, `tests/unit/test_panel.py::test_filling_missing_days_refuses_an_implausible_span` |
+| A horizon-dated actual empties the monitor's window so the alarm cannot fire | The window is bounded on both sides and trimmed against the newest day seen, with a window of slack, so an out-of-order day is counted on its own day only | `tests/unit/test_coverage_monitor.py::test_a_forward_dated_record_does_not_evict_the_window`, `tests/unit/test_coverage_monitor.py::test_a_forward_dated_record_is_not_counted_before_its_day` |
 
 ### Elevation of privilege
 
@@ -95,7 +100,8 @@ are units, prices and flags.
 |---|---|---|
 | An ingestor promotes a calibration | Only the `operator` role reaches the decision routes | `tests/integration/test_service_api.py::test_an_ingestor_key_cannot_read_forecasts_or_decide` |
 | A proposal is applied without approval | The workflow state machine refuses to apply anything not in `approved` | `tests/unit/test_recalibration.py::test_an_unapproved_proposal_cannot_be_applied`, `tests/integration/test_runtime.py::test_a_regime_shift_eventually_opens_an_approval_gated_proposal` |
-| A rejected proposal is resurrected | Only `pending` proposals can be decided | `tests/unit/test_recalibration.py::test_a_rejected_proposal_cannot_be_approved_afterwards` |
+| A rejected proposal is resurrected | Only `pending` proposals can be decided, and the status on disk must match the last transition in the audit chain | `tests/unit/test_recalibration.py::test_a_rejected_proposal_cannot_be_approved_afterwards`, `tests/unit/test_recalibration.py::test_a_rejected_proposal_cannot_be_resurrected_by_editing_the_file` |
+| A proposal that was never opened is approved | A transition is refused unless the chain shows the proposal in the state the file claims | `tests/unit/test_recalibration.py::test_a_proposal_that_was_never_opened_cannot_be_decided` |
 | Container escape widens the blast radius | Non-root final user, read-only root filesystem, dropped capabilities, `no-new-privileges` | `.github/workflows/ci.yml#docker`, `scripts/check_baseline.py` |
 
 ## Residual risks
