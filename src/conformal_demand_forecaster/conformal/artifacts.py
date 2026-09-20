@@ -186,7 +186,10 @@ class CalibrationArtifact:
                 or state.get("calibration_version") != record.calibration_version
             ):
                 raise CalibrationIntegrityError("alpha_state.json belongs to another calibration")
-            aci = AciController.from_dict(state["states"], gamma)
+            try:
+                aci = AciController.from_dict(state["states"], gamma)
+            except ValueError as exc:
+                raise CalibrationIntegrityError(str(exc)) from None
         else:
             aci = AciController(groups, record.alphas, gamma)
         return cls(record, scores, reference, aci)

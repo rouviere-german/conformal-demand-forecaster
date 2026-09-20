@@ -165,9 +165,23 @@ class ScoreBuffer:
         return self._days.get(key, np.zeros(0, dtype=np.int64))
 
     def merge(self, other: ScoreBuffer) -> None:
-        """Append every entry of ``other`` (its own window trimming still applies per key)."""
+        """Append the entries of ``other`` for days this buffer does not already hold.
+
+        Merging is how live scores are folded into the calibration buffer when a recalibration is
+        promoted. Both buffers score the same realized days, so a day already present here is the
+        same observation arriving twice: taking it again would double-weight it in the conformal
+        quantile. Skipping by day makes a repeated merge a no-op. The window trimming of
+        :meth:`append` still applies per key.
+        """
         for key in other.keys:
-            self.append(key, other.days(key), other.scores(key))
+            days = other.days(key)
+            scores = other.scores(key)
+            if days.size == 0:
+                continue
+            known = set(self.days(key).tolist())
+            keep = np.array([int(day) not in known for day in days], dtype=bool)
+            if keep.any():
+                self.append(key, days[keep], scores[keep])
 
     def count(self, key: BufferKey) -> int:
         return int(self._scores.get(key, np.zeros(0)).size)

@@ -333,3 +333,28 @@ def test_calibrator_scores_use_the_mapped_quantile_pair() -> None:
     scores = calibrator.scores(prediction, [12.0])
     assert scores[0.05][0] == pytest.approx(12.0 - 9.0)  # (0.05, 0.95) pair
     assert scores[0.2][0] == pytest.approx(12.0 - 8.0)  # (0.1, 0.9) pair
+
+
+def test_score_buffer_merge_is_idempotent() -> None:
+    """Merging the same live buffer twice must not double-weight its calibration scores."""
+    base = ScoreBuffer(window_days=50)
+    base.append(("smooth/b0", 0.2), [1], [0.5])
+    live = ScoreBuffer(window_days=50)
+    live.append(("smooth/b0", 0.2), [2, 3], [0.75, 1.25])
+
+    base.merge(live)
+    once = base.scores(("smooth/b0", 0.2)).tolist()
+    base.merge(live)
+
+    assert base.scores(("smooth/b0", 0.2)).tolist() == once
+    assert base.count(("smooth/b0", 0.2)) == 3
+
+
+def test_score_buffer_merge_keeps_days_the_target_has_not_seen() -> None:
+    base = ScoreBuffer(window_days=50)
+    base.append(("smooth/b0", 0.2), [1, 2], [0.5, 0.6])
+    live = ScoreBuffer(window_days=50)
+    live.append(("smooth/b0", 0.2), [2, 4], [9.0, 1.5])  # day 2 is already held
+    base.merge(live)
+    assert base.days(("smooth/b0", 0.2)).tolist() == [1, 2, 4]
+    assert base.scores(("smooth/b0", 0.2)).tolist() == [0.5, 0.6, 1.5]

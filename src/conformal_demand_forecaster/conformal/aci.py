@@ -139,9 +139,21 @@ class AciController:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Mapping[str, Any]], gamma: float) -> AciController:
+        """Restore states, refusing any that was written under a different step size.
+
+        The persisted alpha state is the one artifact that is not covered by the calibration
+        digest, and ``gamma`` drives the whole recursion: a state restored at another step size
+        would run a controller nobody configured, so the load fails closed instead.
+        """
         controller = cls([], [], gamma)
         for key, value in data.items():
             group, _, alpha = key.rpartition("|")
-            controller.states[(group, float(alpha))] = AlphaState.from_dict(value)
+            state = AlphaState.from_dict(value)
+            if state.gamma != gamma:
+                raise ValueError(
+                    f"persisted alpha state for {key!r} was written with gamma {state.gamma}, "
+                    f"but the configured gamma is {gamma}"
+                )
+            controller.states[(group, float(alpha))] = state
         controller.alphas = tuple(sorted({alpha for _, alpha in controller.states}, reverse=True))
         return controller

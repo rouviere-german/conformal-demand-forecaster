@@ -199,3 +199,20 @@ def test_daily_updates_keep_coverage_near_target_under_a_shift() -> None:
     tail = float(np.mean(realized[-100:]))
     assert tail < 0.25  # recovered well below the un-adapted 0.45 miss rate
     assert abs(state.long_run_error) <= aci_long_run_bound(0.1, 0.05, len(realized))
+
+
+def test_a_persisted_state_written_with_another_gamma_is_refused() -> None:
+    """``alpha_state.json`` is the one artifact outside the digest check, so it fails closed.
+
+    The step size drives the whole recursion; silently running at a gamma the configuration never
+    chose would make every published coverage claim about a different controller.
+    """
+    controller = AciController(["smooth/b0"], [0.2], gamma=0.05)
+    controller.update("smooth/b0", 0.2, misses=1, n=4)
+    payload = controller.to_dict()
+
+    with pytest.raises(ValueError, match="gamma"):
+        AciController.from_dict(payload, gamma=0.08)
+
+    restored = AciController.from_dict(payload, gamma=0.05)
+    assert restored.to_dict() == payload
