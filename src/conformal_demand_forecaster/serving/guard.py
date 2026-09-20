@@ -5,7 +5,7 @@ A poisoned spike would drag the alpha state down and widen every interval for th
 each incoming value is compared with the series' recent history: ``z = (y - median) / scale``
 with ``scale = max(1.4826 * MAD, sqrt(max(median, p90) + 1))``.
 
-The floor is a Poisson-like spread for count data. It is anchored on the 75th percentile when
+The floor is a Poisson-like spread for count data. It is anchored on the 90th percentile when
 that is above the median, which is what makes the guard usable on intermittent series: a series
 that sells on one day in four has a median of 0 and a MAD of 0, so a median-only floor would
 score an ordinary sale of ten units at z = 10 and quarantine it. A percentile is used rather
