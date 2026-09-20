@@ -1,0 +1,36 @@
+# Local stack. Only locally built images; nothing is pulled at runtime besides the pinned bases.
+services:
+  app:
+    build:
+      context: .
+    image: conformal-demand-forecaster:local
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENVIRONMENT: prod
+      APP_LOG_LEVEL: INFO
+      # Comma-separated SHA-256 digests, one list per role. Generate a key with
+      # `uv run conformal-demand-forecaster generate-api-key` and store only the digest.
+      APP_READER_KEY_SHA256: ${APP_READER_KEY_SHA256:-}
+      APP_INGESTOR_KEY_SHA256: ${APP_INGESTOR_KEY_SHA256:-}
+      APP_OPERATOR_KEY_SHA256: ${APP_OPERATOR_KEY_SHA256:-}
+      # Trained artifacts, the DuckDB store, the audit log and the MLflow run log live here.
+      APP_DATA_DIR: /var/lib/forecaster
+    read_only: true
+    volumes:
+      # The service writes forecasts, calibration state and the audit chain, so this one path is
+      # writable while the rest of the root filesystem stays read-only.
+      - forecaster-data:/var/lib/forecaster
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2.0
+    restart: unless-stopped
+
+volumes:
+  forecaster-data:
