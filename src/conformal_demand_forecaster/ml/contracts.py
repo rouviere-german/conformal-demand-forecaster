@@ -3,10 +3,14 @@
 Failure summaries report column, check and count only. The failing values themselves are never
 copied into the exception, so a contract error can be logged without leaking the data it
 rejected.
+
+``validate_actuals`` also takes the day window the serving state accepts, because an ingested
+date is attacker-controlled and the panel is a dense (series x day) grid.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from typing import ClassVar
 
 import pandas as pd
@@ -127,9 +131,34 @@ def validate_panel(frame: pd.DataFrame) -> pd.DataFrame:
         raise _summarize(exc) from None
 
 
-def validate_actuals(frame: pd.DataFrame) -> pd.DataFrame:
-    """Validate an actuals frame the same way."""
+def validate_actuals(
+    frame: pd.DataFrame,
+    *,
+    min_date: pd.Timestamp | date | None = None,
+    max_date: pd.Timestamp | date | None = None,
+) -> pd.DataFrame:
+    """Validate an actuals frame the same way, optionally inside an accepted day window.
+
+    The schema alone cannot bound the day, because the window is the serving state: the panel
+    starts somewhere and forecasts reach a horizon past its last observed day. The caller that
+    knows the window passes it, and dates outside it are a contract violation rather than a
+    quarantine -- they are rejected before anything downstream sees them.
+    """
     try:
-        return ActualsSchema.validate(frame, lazy=True)
+        validated = ActualsSchema.validate(frame, lazy=True)
     except (SchemaErrors, SchemaError) as exc:
         raise _summarize(exc) from None
+    if min_date is None and max_date is None:
+        return validated
+    days = pd.to_datetime(validated["date"])
+    outside = pd.Series(False, index=days.index)
+    if min_date is not None:
+        outside |= days < pd.Timestamp(min_date)
+    if max_date is not None:
+        outside |= days > pd.Timestamp(max_date)
+    count = int(outside.sum())
+    if count:
+        raise DataContractError(
+            [{"column": "date", "check": "within_ingest_window", "count": count}]
+        )
+    return validated

@@ -22,11 +22,19 @@ FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
 
 
-def _fill_missing_days(frame: pd.DataFrame) -> pd.DataFrame:
-    """Reindex onto the full (series x day) grid, leaving unobserved sales as NaN."""
+def _fill_missing_days(frame: pd.DataFrame, max_days: int | None = None) -> pd.DataFrame:
+    """Reindex onto the full (series x day) grid, leaving unobserved sales as NaN.
+
+    ``max_days`` bounds the grid that may be materialized. The span comes from the data, so a
+    single row dated years away would otherwise build a cell for every series and every day in
+    between, on this call and on every later one.
+    """
     if frame.empty:
         return frame
     series_ids = sorted(str(item) for item in frame["series_id"].unique())
+    span = (frame["date"].max() - frame["date"].min()).days + 1
+    if max_days is not None and span > max_days:
+        raise ValueError(f"panel would span {span} days, above the maximum of {max_days}")
     dates = pd.date_range(frame["date"].min(), frame["date"].max(), freq="D")
     index = pd.MultiIndex.from_product([series_ids, dates], names=["series_id", "date"])
     indexed = frame.set_index(["series_id", "date"])
@@ -92,7 +100,12 @@ class Panel:
 
     @classmethod
     def from_frame(
-        cls, frame: pd.DataFrame, *, validate: bool = True, fill_missing_days: bool = False
+        cls,
+        frame: pd.DataFrame,
+        *,
+        validate: bool = True,
+        fill_missing_days: bool = False,
+        max_days: int | None = None,
     ) -> Panel:
         """Build a panel from a long frame.
 
@@ -101,10 +114,11 @@ class Panel:
         guard quarantines one series' day, that series simply has no observation for it, while
         every other series moves on. Prices are carried forward, promotions and stockout flags
         default to none, and the NaN sales flow through the feature builder as missing history.
+        ``max_days`` caps the span that may be filled in, and raises rather than build it.
         """
         data = validate_panel(frame) if validate else frame
         if fill_missing_days:
-            data = _fill_missing_days(data)
+            data = _fill_missing_days(data, max_days)
         data = data.sort_values(["series_id", "date"], kind="stable")
         series_ids = tuple(str(item) for item in data["series_id"].unique())
         dates = pd.DatetimeIndex(sorted(data["date"].unique()))

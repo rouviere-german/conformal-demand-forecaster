@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     # one point at both levels, for about 3% more interval width than 0.03.
     aci_gamma: float = Field(default=0.08, gt=0, le=0.5)
     calibration_window_days: int = Field(default=56, ge=7, le=365)
+    # The panel is a dense (series x day) grid rebuilt from the store on every forecast, so the
+    # span it may cover is bounded: about eleven years of daily history.
+    panel_max_days: int = Field(default=4_000, ge=30, le=100_000)
 
     # --- coverage monitor (SLO: within tolerance of nominal over the window) ---
     coverage_window_days: int = Field(default=28, ge=7, le=365)

@@ -125,6 +125,19 @@ class ForecastStore:
             self._conn.unregister("panel_df")
         return len(data)
 
+    def replace_panel(self, frame: pd.DataFrame) -> int:
+        """Install ``frame`` as *the* panel, dropping whatever was served before it.
+
+        Training installs a panel; it does not merge into one. Leaving the previous rows behind
+        would let a stale later day decide the forecast origin and leave forecasts and actuals
+        that belong to a panel the store no longer holds.
+        """
+        with self._lock:
+            self._conn.execute("DELETE FROM forecasts")
+            self._conn.execute("DELETE FROM actuals")
+            self._conn.execute("DELETE FROM sales")
+        return self.write_panel(frame)
+
     def load_panel(self) -> pd.DataFrame:
         with self._lock:
             frame = self._conn.execute(
@@ -160,19 +173,47 @@ class ForecastStore:
             ).fetchall()
         return np.asarray([float(r[0]) for r in reversed(rows)], dtype=np.float64)
 
+    def existing_sales_days(self, pairs: Sequence[tuple[str, date]]) -> set[tuple[str, date]]:
+        """Which of ``pairs`` already have a stored sales row."""
+        if not pairs:
+            return set()
+        keys = pd.DataFrame({"series_id": [p[0] for p in pairs], "date": [p[1] for p in pairs]})
+        with self._lock:
+            self._conn.register("keys_df", keys)
+            rows = self._conn.execute(
+                "SELECT DISTINCT s.series_id, s.date FROM sales s JOIN keys_df k"
+                " ON s.series_id = k.series_id AND s.date = k.date"
+            ).fetchall()
+            self._conn.unregister("keys_df")
+        return {(str(series), day) for series, day in rows}
+
     def append_sales(self, rows: Iterable[dict[str, Any]]) -> int:
-        """Append accepted actuals as new panel days (price carried forward per series)."""
+        """Append accepted actuals as new panel days; return how many were inserted.
+
+        The panel is append-only. A row for a (series, day) that is already stored is skipped,
+        never written over: the stored sales are the outlier guard's own reference window, the
+        feature builder's history and, after a promotion, the calibration scores, so silently
+        rewriting a recorded day would move all three. Callers that need to report the skipped
+        days ask :meth:`existing_sales_days` first; this check is the second line of defence.
+        """
         payload = list(rows)
         if not payload:
             return 0
+        inserted = 0
         with self._lock:
             for row in payload:
+                taken = self._conn.execute(
+                    "SELECT 1 FROM sales WHERE series_id = ? AND date = ?",
+                    [row["series_id"], row["date"]],
+                ).fetchone()
+                if taken is not None:
+                    continue
                 price = self._conn.execute(
                     "SELECT price FROM sales WHERE series_id = ? ORDER BY date DESC LIMIT 1",
                     [row["series_id"]],
                 ).fetchone()
                 self._conn.execute(
-                    "INSERT OR REPLACE INTO sales VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?)",
                     [
                         row["series_id"],
                         row["date"],
@@ -183,7 +224,8 @@ class ForecastStore:
                         row["segment"],
                     ],
                 )
-        return len(payload)
+                inserted += 1
+        return inserted
 
     # --- forecasts -------------------------------------------------------------------------
 

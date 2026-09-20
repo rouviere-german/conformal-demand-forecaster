@@ -221,3 +221,74 @@ def test_a_file_backed_store_persists_across_connections(tmp_path: Path) -> None
         assert second.counts()["sales"] == 20
     finally:
         second.close()
+
+
+# --- the panel is append-only ----------------------------------------------------------------
+# The stored sales are the guard's reference window, the feature builder's history and, after a
+# recalibration, the calibration scores. An ingestor key may add a day that is missing; it may not
+# rewrite one that was already recorded.
+
+
+def test_appending_a_day_that_is_already_stored_never_rewrites_it(store: ForecastStore) -> None:
+    store.write_panel(panel_frame())
+    before = store.load_panel()
+    replay = [
+        {
+            "series_id": "S0001_ST00",
+            "date": date(2024, 1, 7),
+            "sales": 0,
+            "stockout": 0,
+            "segment": "smooth",
+        }
+    ]
+    assert store.append_sales(replay) == 0
+    after = store.load_panel()
+    assert after["sales"].tolist() == before["sales"].tolist()
+
+
+def test_appending_reports_only_the_rows_it_inserted(store: ForecastStore) -> None:
+    store.write_panel(panel_frame())
+    rows = [
+        {
+            "series_id": "S0001_ST00",
+            "date": day,
+            "sales": 3,
+            "stockout": 0,
+            "segment": "smooth",
+        }
+        for day in (date(2024, 1, 5), date(2024, 1, 11))
+    ]
+    assert store.append_sales(rows) == 1
+    assert store.counts()["sales"] == 21
+
+
+def test_existing_sales_days_reports_the_days_already_recorded(store: ForecastStore) -> None:
+    store.write_panel(panel_frame())
+    pairs = [
+        ("S0001_ST00", date(2024, 1, 3)),
+        ("S0001_ST00", date(2024, 1, 30)),
+        ("S9999_ST00", date(2024, 1, 3)),
+    ]
+    assert store.existing_sales_days(pairs) == {("S0001_ST00", date(2024, 1, 3))}
+    assert store.existing_sales_days([]) == set()
+
+
+def test_replacing_the_panel_clears_the_previous_install(store: ForecastStore) -> None:
+    store.write_panel(panel_frame())
+    store.write_forecasts(forecast_frame())
+    store.write_actuals(
+        [
+            {
+                "series_id": "S0001_ST00",
+                "date": date(2024, 1, 9),
+                "sales": 9,
+                "status": "accepted",
+                "actor": "test",
+            }
+        ]
+    )
+    later = panel_frame()
+    later["date"] = later["date"] + pd.Timedelta(days=365)
+    assert store.replace_panel(later) == 20
+    assert store.counts() == {"sales": 20, "forecasts": 0, "actuals": 0}
+    assert store.last_sales_date() == date(2025, 1, 9)

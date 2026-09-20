@@ -20,6 +20,8 @@ class ForecastMetrics:
     feature_psi: Gauge
     actuals_accepted_total: Counter
     actuals_quarantined_total: Counter
+    actuals_rejected_total: Counter
+    newsvendor_fractile_clipped_total: Counter
     calibration_saturated_total: Counter
     recalibration_proposals_total: Counter
 
@@ -78,6 +80,19 @@ def create_forecast_metrics(registry: CollectorRegistry, namespace: str = "app")
             "actuals_quarantined_total",
             "Ingested actuals quarantined by the outlier guard.",
             ["reason"],
+            namespace=namespace,
+            registry=registry,
+        ),
+        actuals_rejected_total=Counter(
+            "actuals_rejected_total",
+            "Ingested actuals refused before the guard (a day the panel already holds).",
+            ["reason"],
+            namespace=namespace,
+            registry=registry,
+        ),
+        newsvendor_fractile_clipped_total=Counter(
+            "newsvendor_fractile_clipped_total",
+            "Orders served at the outermost calibrated quantile instead of the asked fractile.",
             namespace=namespace,
             registry=registry,
         ),

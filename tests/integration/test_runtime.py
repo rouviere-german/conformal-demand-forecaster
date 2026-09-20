@@ -411,3 +411,146 @@ def test_readiness_tracks_forecast_freshness(
     finally:
         stale.close()
     assert panel.n_days == SHIFT_DAY + POST_DAYS
+
+
+# --- the ingest window -----------------------------------------------------------------------
+# An ingestor key decides the *day* of every value it posts. The panel is a dense (series x day)
+# grid, so a day far outside the served range would be materialized for every series and stay in
+# the store; a day ahead of the clock would also leave the freshness check looking green.
+
+
+def test_a_far_future_dated_actual_is_rejected(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    runtime, _, _, panel = installed
+    before = runtime.store.counts()["sales"]
+    days_before = runtime.panel.n_days
+    record = ActualRecord(series_id=panel.series_ids[0], date=date(2045, 1, 1), sales=5)
+
+    with pytest.raises(DataContractError):
+        runtime.ingest([record], actor="key:ingestor")
+
+    assert runtime.store.counts()["sales"] == before
+    assert runtime.panel.n_days == days_before
+
+
+def test_an_actual_before_the_panel_starts_is_rejected(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    runtime, _, _, panel = installed
+    earlier = (panel.dates[0] - pd.Timedelta(days=1)).date()
+    with pytest.raises(DataContractError):
+        runtime.ingest(
+            [ActualRecord(series_id=panel.series_ids[0], date=earlier, sales=5)],
+            actor="key:ingestor",
+        )
+    assert runtime.store.counts()["sales"] == 8 * SHIFT_DAY
+
+
+def test_an_actual_at_the_far_end_of_the_horizon_is_still_accepted(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+    settings: Settings,
+) -> None:
+    runtime, _, _, panel = installed
+    furthest = panel.dates[SHIFT_DAY - 1 + settings.forecast_horizon].date()
+    summary = runtime.ingest(
+        [ActualRecord(series_id=panel.series_ids[0], date=furthest, sales=5)],
+        actor="key:ingestor",
+    )
+    assert summary.received == 1
+    assert summary.accepted + summary.quarantined == 1
+
+
+def test_a_future_dated_origin_is_not_reported_as_fresh(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    """A negative age is not freshness: the origin lies ahead of the service's own clock."""
+    runtime, _, _, panel = installed
+    assert runtime.forecasts_fresh() is True
+    earlier = make_runtime(settings, tmp_path, (panel.dates[0] - pd.Timedelta(days=1)).date())
+    try:
+        earlier.load()
+        assert earlier.forecasts_fresh() is False
+    finally:
+        earlier.close()
+
+
+# --- replayed days ---------------------------------------------------------------------------
+
+
+def test_replaying_a_stored_day_cannot_rewrite_it(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    runtime, _, _, panel = installed
+    first = runtime.ingest(records_for(panel, SHIFT_DAY), actor="key:ingestor")
+    assert first.accepted >= 1
+    stored = runtime.store.load_panel()
+    day = panel.dates[SHIFT_DAY]
+    before = stored.loc[stored["date"] == day, ["series_id", "sales"]].set_index("series_id")
+    assert not before.empty
+
+    replay = [
+        ActualRecord(series_id=str(series), date=day.date(), sales=0) for series in before.index
+    ]
+    summary = runtime.ingest(replay, actor="key:attacker")
+
+    assert summary.duplicates == len(replay)
+    assert summary.accepted == 0
+    after = runtime.store.load_panel()
+    after = after.loc[after["date"] == day, ["series_id", "sales"]].set_index("series_id")
+    assert after["sales"].tolist() == before["sales"].tolist()
+    actions = [entry.action for entry in runtime.audit.entries()]
+    assert "actuals_duplicate_rejected" in actions
+    assert verify_chain(runtime.paths.audit).ok is True
+
+
+def test_a_replayed_day_is_not_scored_a_second_time(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    runtime, _, _, panel = installed
+    assert runtime.artifact is not None
+    runtime.ingest(records_for(panel, SHIFT_DAY), actor="key:ingestor")
+    states = {key: state.updates for key, state in runtime.artifact.aci.states.items()}
+
+    summary = runtime.ingest(records_for(panel, SHIFT_DAY), actor="key:ingestor")
+
+    assert summary.scored == 0
+    assert {key: state.updates for key, state in runtime.artifact.aci.states.items()} == states
+
+
+# --- the order payload -------------------------------------------------------------------------
+
+
+def test_the_order_payload_flags_a_fractile_beyond_the_widest_band(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    runtime, _, _, panel = installed
+    greedy = runtime.get_forecast(panel.series_ids[0], 1, holding_cost=1.0, stockout_cost=1_000.0)
+    assert greedy is not None
+    assert greedy["order"]["fractile"] == pytest.approx(1_000.0 / 1_001.0)
+    assert greedy["order"]["fractile_clipped"] is True
+    assert greedy["order"]["fractile_served"] == pytest.approx(0.975)
+    assert greedy["order"]["quantity"] == pytest.approx(greedy["intervals"]["95"]["upper"])
+
+    ordinary = runtime.get_forecast(panel.series_ids[0], 1)
+    assert ordinary is not None
+    assert ordinary["order"]["fractile_clipped"] is False
+    assert ordinary["order"]["fractile_served"] == pytest.approx(0.8)
+
+
+def test_installing_a_panel_replaces_the_one_that_was_served(
+    installed: tuple[ForecastRuntime, dict[str, JsonValue], pd.DataFrame, Panel],
+) -> None:
+    """A fresh install is not an append: the previous panel must not decide the new origin."""
+    runtime, _, full_frame, panel = installed
+    shorter = full_frame[full_frame["date"] < panel.dates[SHIFT_DAY - 40]].copy()
+
+    summary = runtime.train_and_install(
+        shorter, seed=SEED, generator_params={"n_series": 8}, gbm=GBM, run_name="reinstall"
+    )
+
+    assert runtime.store.counts()["sales"] == len(shorter)
+    assert summary["origin"] == str(panel.dates[SHIFT_DAY - 41].date())
+    assert runtime.panel.n_days == SHIFT_DAY - 40

@@ -162,3 +162,37 @@ def test_a_panel_without_observations_reports_it() -> None:
     )
     with pytest.raises(ValueError, match="no observed sales"):
         _ = empty.last_observed_day
+
+
+def test_filling_missing_days_refuses_an_implausible_span() -> None:
+    """One far-dated row must not be allowed to materialize a decade-wide grid."""
+    frame = pd.DataFrame(
+        {
+            "series_id": ["S1", "S1", "S2", "S2"],
+            "date": pd.to_datetime(["2024-01-01", "2044-01-01", "2024-01-01", "2024-01-02"]),
+            "sales": [1, 2, 3, 4],
+            "price": [1.0] * 4,
+            "promo": [0] * 4,
+            "stockout": [0] * 4,
+            "segment": ["smooth"] * 4,
+        }
+    )
+    with pytest.raises(ValueError, match="span"):
+        Panel.from_frame(frame, validate=False, fill_missing_days=True, max_days=400)
+
+
+def test_filling_missing_days_accepts_a_span_within_the_cap() -> None:
+    frame = pd.DataFrame(
+        {
+            "series_id": ["S1", "S1", "S2"],
+            "date": pd.to_datetime(["2024-01-01", "2024-01-03", "2024-01-01"]),
+            "sales": [1, 2, 3],
+            "price": [1.0] * 3,
+            "promo": [0] * 3,
+            "stockout": [0] * 3,
+            "segment": ["smooth"] * 3,
+        }
+    )
+    panel = Panel.from_frame(frame, validate=False, fill_missing_days=True, max_days=400)
+    assert panel.n_days == 3
+    assert np.isnan(panel.sales[1, 1])

@@ -20,7 +20,7 @@ import json
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +113,7 @@ class IngestSummary(BaseModel):
     received: int
     accepted: int
     quarantined: int
+    duplicates: int
     unknown_series: int
     scored: int
     alarms: list[str]
@@ -242,7 +243,10 @@ class ForecastRuntime:
             # quarantined day legitimately leaves one series without an observation, so the
             # panel is rebuilt tolerantly rather than re-validated for strict continuity.
             self._panel = Panel.from_frame(
-                self.store.load_panel(), validate=False, fill_missing_days=True
+                self.store.load_panel(),
+                validate=False,
+                fill_missing_days=True,
+                max_days=self.settings.panel_max_days,
             )
         return self._panel
 
@@ -255,10 +259,16 @@ class ForecastRuntime:
         return self.artifact is not None and self.model is not None
 
     def forecasts_fresh(self) -> bool:
+        """Whether the newest origin is recent -- and not ahead of the service's own clock.
+
+        A negative age means the store holds forecasts issued from a day that has not happened,
+        which is a sign of a bad origin rather than of freshness, so readiness fails on it.
+        """
         latest = self.store.latest_origin()
         if latest is None:
             return False
-        return (self.clock().date() - latest).days <= self.settings.freshness_max_days
+        age = (self.clock().date() - latest).days
+        return 0 <= age <= self.settings.freshness_max_days
 
     # --- install -----------------------------------------------------------------------------
 
@@ -275,7 +285,9 @@ class ForecastRuntime:
         self.paths.root.mkdir(parents=True, exist_ok=True)
         panel_frame.to_csv(self.paths.panel_csv, index=False, lineterminator="\n")
         data_sha256 = sha256_file(self.paths.panel_csv)
-        self.store.write_panel(panel_frame)
+        # An install replaces the served panel; rows of an earlier one would otherwise decide the
+        # origin and leave forecasts and actuals behind that belong to a panel nobody serves.
+        self.store.replace_panel(panel_frame)
         self._panel = None
         panel = self.panel
         origin = panel.last_observed_day
@@ -504,6 +516,8 @@ class ForecastRuntime:
             for alpha in training.alphas
         }
         decision = order_quantity(float(record["q0_500"]), intervals, holding, stockout)
+        if decision.clipped and self.metrics is not None:
+            self.metrics.newsvendor_fractile_clipped_total.inc()
         return {
             "series_id": series_id,
             "origin_date": str(record["origin_date"]),
@@ -527,6 +541,10 @@ class ForecastRuntime:
                 "holding_cost": holding,
                 "stockout_cost": stockout,
                 "fractile": decision.fractile,
+                # The interpolation saturates at the outermost calibrated quantile, so a cost
+                # ratio beyond it is served at a different fractile than the one requested.
+                "fractile_served": decision.fractile_served,
+                "fractile_clipped": decision.clipped,
                 "quantity": decision.order,
                 "units": decision.order_units,
             },
@@ -545,58 +563,29 @@ class ForecastRuntime:
                 "sales": np.array([r.sales for r in records], dtype=np.int64),
             }
         )
-        validate_actuals(frame)
+        panel = self.panel
+        first_day = panel.dates[0].date()
+        last_day = panel.dates[panel.last_observed_day].date()
+        validate_actuals(
+            frame,
+            min_date=first_day,
+            max_date=last_day + timedelta(days=training.horizon),
+        )
         segments = self.store.series_segments()
         known = [r for r in records if r.series_id in segments]
         unknown = len(records) - len(known)
 
-        accepted: list[ActualRecord] = []
-        stored: list[dict[str, Any]] = []
-        for record in known:
-            history = self.store.recent_sales(
-                record.series_id, self.settings.calibration_window_days
-            )
-            decision = self.guard.check(float(record.sales), history)
-            status = "accepted" if decision.accepted else "quarantined"
-            stored.append(
-                {
-                    "series_id": record.series_id,
-                    "date": record.date,
-                    "sales": record.sales,
-                    "status": status,
-                    "z_score": None if math.isnan(decision.z) else round(decision.z, 4),
-                    "actor": actor,
-                }
-            )
-            if decision.accepted:
-                accepted.append(record)
-            elif self.metrics is not None:
-                self.metrics.actuals_quarantined_total.labels(decision.reason).inc()
-        self.store.write_actuals(stored)
-        if self.metrics is not None and accepted:
-            self.metrics.actuals_accepted_total.inc(len(accepted))
+        # A day already in the panel is history. It is never rewritten, never re-scored and never
+        # allowed to move the guard's own reference window; the attempt is audited instead.
+        recorded = self.store.existing_sales_days([(r.series_id, r.date) for r in known])
+        duplicates = [r for r in known if (r.series_id, r.date) in recorded]
+        fresh = [r for r in known if (r.series_id, r.date) not in recorded]
+        if duplicates:
+            self._audit_duplicates(duplicates, actor)
 
+        accepted = self._screen(fresh, actor)
         scored, touched_days = self._score_accepted(accepted, artifact, training, segments)
-        alarms: list[str] = []
-        opened: list[str] = []
-        keys = [(segment, alpha) for segment in SEGMENTS for alpha in training.alphas]
-        for day in sorted(touched_days):
-            for check in self.monitor.evaluate(day, keys):
-                if check.alarm:
-                    alarms.append(f"{check.segment}@{_tag(check.alpha)}")
-                    if self.metrics is not None:
-                        self.metrics.coverage_alarm_total.labels(
-                            _tag(check.alpha), check.segment
-                        ).inc()
-                    proposal = self.workflow.open(check)
-                    if proposal is not None:
-                        opened.append(proposal.id)
-                        if self.metrics is not None:
-                            self.metrics.recalibration_proposals_total.labels("opened").inc()
-                if self.metrics is not None and check.n:
-                    self.metrics.rolling_coverage.labels(_tag(check.alpha), check.segment).set(
-                        check.coverage
-                    )
+        alarms, opened = self._raise_alarms(touched_days, training)
 
         self.store.append_sales(
             [
@@ -617,13 +606,83 @@ class ForecastRuntime:
         return IngestSummary(
             received=len(records),
             accepted=len(accepted),
-            quarantined=len(known) - len(accepted),
+            quarantined=len(fresh) - len(accepted),
+            duplicates=len(duplicates),
             unknown_series=unknown,
             scored=scored,
-            alarms=sorted(set(alarms)),
+            alarms=alarms,
             proposals_opened=opened,
             calibration_version=artifact.version,
         )
+
+    def _screen(self, records: Sequence[ActualRecord], actor: str) -> list[ActualRecord]:
+        """Run every record past the outlier guard; store the verdicts and return the accepted."""
+        accepted: list[ActualRecord] = []
+        stored: list[dict[str, Any]] = []
+        for record in records:
+            history = self.store.recent_sales(
+                record.series_id, self.settings.calibration_window_days
+            )
+            decision = self.guard.check(float(record.sales), history)
+            stored.append(
+                {
+                    "series_id": record.series_id,
+                    "date": record.date,
+                    "sales": record.sales,
+                    "status": "accepted" if decision.accepted else "quarantined",
+                    "z_score": None if math.isnan(decision.z) else round(decision.z, 4),
+                    "actor": actor,
+                }
+            )
+            if decision.accepted:
+                accepted.append(record)
+            elif self.metrics is not None:
+                self.metrics.actuals_quarantined_total.labels(decision.reason).inc()
+        self.store.write_actuals(stored)
+        if self.metrics is not None and accepted:
+            self.metrics.actuals_accepted_total.inc(len(accepted))
+        return accepted
+
+    def _raise_alarms(
+        self, touched_days: set[int], training: TrainingConfig
+    ) -> tuple[list[str], list[str]]:
+        """Evaluate the SLO on every day this ingest touched; open a proposal per fresh breach."""
+        alarms: list[str] = []
+        opened: list[str] = []
+        keys = [(segment, alpha) for segment in SEGMENTS for alpha in training.alphas]
+        for day in sorted(touched_days):
+            for check in self.monitor.evaluate(day, keys):
+                if check.alarm:
+                    alarms.append(f"{check.segment}@{_tag(check.alpha)}")
+                    if self.metrics is not None:
+                        self.metrics.coverage_alarm_total.labels(
+                            _tag(check.alpha), check.segment
+                        ).inc()
+                    proposal = self.workflow.open(check)
+                    if proposal is not None:
+                        opened.append(proposal.id)
+                        if self.metrics is not None:
+                            self.metrics.recalibration_proposals_total.labels("opened").inc()
+                if self.metrics is not None and check.n:
+                    self.metrics.rolling_coverage.labels(_tag(check.alpha), check.segment).set(
+                        check.coverage
+                    )
+        return sorted(set(alarms)), opened
+
+    def _audit_duplicates(self, duplicates: Sequence[ActualRecord], actor: str) -> None:
+        """Record an attempt to re-post days the panel already holds (values are not logged)."""
+        if self.metrics is not None:
+            self.metrics.actuals_rejected_total.labels("duplicate_day").inc(len(duplicates))
+        self.audit.append(
+            actor,
+            "actuals_duplicate_rejected",
+            {
+                "count": len(duplicates),
+                "series": sorted({r.series_id for r in duplicates})[:10],
+                "days": sorted({str(r.date) for r in duplicates})[:10],
+            },
+        )
+        _log.warning("actuals_duplicate_rejected", actor=actor, count=len(duplicates))
 
     def _score_accepted(
         self,
