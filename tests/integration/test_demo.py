@@ -14,14 +14,21 @@ from typing import Any
 import pytest
 
 from conformal_demand_forecaster import cli
-from conformal_demand_forecaster.demo import DEMO_SEED, run_demo
+from conformal_demand_forecaster.demo import DEMO_SEED, DemoError, run_demo
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 @pytest.fixture(scope="module")
-def summary(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-    return dict(run_demo(tmp_path_factory.mktemp("demo")))
+def runs(tmp_path_factory: pytest.TempPathFactory) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The demo run twice in the *same* workdir: a demo that is not repeatable is not a demo."""
+    workdir = tmp_path_factory.mktemp("demo")
+    return dict(run_demo(workdir)), dict(run_demo(workdir))
+
+
+@pytest.fixture(scope="module")
+def summary(runs: tuple[dict[str, Any], dict[str, Any]]) -> dict[str, Any]:
+    return runs[0]
 
 
 def test_the_demo_reports_the_scenario_it_ran(summary: dict[str, Any]) -> None:
@@ -44,7 +51,45 @@ def test_aci_holds_coverage_better_than_frozen_split_conformal(summary: dict[str
     """The headline claim: after the shift, the adaptive band tracks the target more closely."""
     static = summary["static_coverage_80_post_shift"]
     adaptive = summary["aci_coverage_80_post_shift"]
+    # Both tracks must actually have been scored: 0.0 vs 0.0 is a failed run, not a tie.
+    assert int(summary["static_scored_post_shift"]) > 1_000
+    assert int(summary["aci_scored_post_shift"]) > 1_000
+    assert 0.5 < static < 0.8
+    assert adaptive > static
     assert abs(adaptive - 0.8) <= abs(static - 0.8)
+
+
+def test_running_the_demo_again_in_the_same_workdir_reproduces_it(
+    runs: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    """A second run must start from a clean slate rather than report the first run's leftovers."""
+    first, second = runs
+    compared = (
+        "series",
+        "days",
+        "shift_day",
+        "post_shift_days",
+        "backtest_coverage_80_mondrian_pre_shift",
+        "backtest_coverage_95_mondrian_pre_shift",
+        "backtest_mase_gbm",
+        "static_coverage_80_post_shift",
+        "aci_coverage_80_post_shift",
+        "static_scored_post_shift",
+        "aci_scored_post_shift",
+        "quarantined_actuals",
+        "first_alarm_day_after_shift",
+        "audit_entries",
+    )
+    assert {key: second[key] for key in compared} == {key: first[key] for key in compared}
+    assert second["proposals_opened"]
+    assert second["pending_proposals"]
+
+
+def test_the_demo_refuses_a_workdir_it_did_not_create(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("someone else's directory", encoding="utf-8")
+    with pytest.raises(DemoError, match="not empty"):
+        run_demo(tmp_path)
+    assert (tmp_path / "notes.txt").exists()
 
 
 def test_the_coverage_monitor_fires_and_opens_a_proposal(summary: dict[str, Any]) -> None:

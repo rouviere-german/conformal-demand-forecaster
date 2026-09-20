@@ -26,7 +26,14 @@ EXPERIMENT = "conformal-demand-forecaster"
 
 
 def _tracking_uri(directory: Path) -> str:
-    directory.mkdir(parents=True, exist_ok=True)
+    """The file URI of ``directory``, with the layout the file store expects already in place.
+
+    MLflow keeps one store object per tracking URI for the life of the process, and that object
+    assumes its own folders still exist. A tracking directory that is recreated between two runs
+    in one process -- which is what the demo does to start from a clean slate -- would otherwise
+    fail on the missing ``.trash`` folder the cached store never recreates.
+    """
+    (directory / ".trash").mkdir(parents=True, exist_ok=True)
     return directory.resolve().as_uri()
 
 

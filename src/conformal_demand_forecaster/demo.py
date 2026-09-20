@@ -7,11 +7,13 @@ covered the realized demand, so the summary shows static coverage degrading whil
 the binomial coverage alarm firing and a recalibration proposal waiting for an operator.
 
 Nothing here reaches the network: the panel comes from the seeded generator and the models are
-trained locally in a few seconds.
+trained locally in a few seconds. The workdir is recreated on every run, so two runs of the same
+command report the same story.
 """
 
 from __future__ import annotations
 
+import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -35,7 +37,7 @@ from conformal_demand_forecaster.models.gbm import GbmConfig
 from conformal_demand_forecaster.serving.runtime import ActualRecord, ForecastRuntime, RuntimePaths
 from conformal_demand_forecaster.training import TrainingConfig
 
-__all__ = ["DEMO_SEED", "run_demo"]
+__all__ = ["DEMO_SEED", "DemoError", "run_demo"]
 
 DEMO_SEED = 20260914
 _N_SERIES = 24
@@ -44,8 +46,34 @@ _POST_DAYS = 70
 _SPIKE_DAY = 12  # days after the shift
 _SPIKE_FACTOR = 60
 _DEMO_TAG = "80"
+_MARKER = ".demo-workdir"
 
 DemandLookup = dict[tuple[str, pd.Timestamp], float]
+
+
+class DemoError(RuntimeError):
+    """The demo cannot run, or cannot score what it just ran."""
+
+
+def _prepare_workdir(workdir: Path) -> None:
+    """Recreate ``workdir`` so every run starts from the same empty state.
+
+    The demo installs a panel and replays 70 days of actuals through it. On top of a previous
+    run's store the install would land behind that run's last day, the forecasts would target
+    days the generated panel does not cover and the summary would report the leftovers rather
+    than the scenario. Directories the demo did not create are refused rather than deleted.
+    """
+    if workdir.exists() and any(workdir.iterdir()) and not (workdir / _MARKER).exists():
+        raise DemoError(
+            f"{workdir} is not empty and was not created by the demo; "
+            "pass an empty --workdir, or delete it first"
+        )
+    shutil.rmtree(workdir, ignore_errors=True)
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / _MARKER).write_text(
+        "Created by `conformal-demand-forecaster demo`; recreated on every run.\n",
+        encoding="utf-8",
+    )
 
 
 def _demo_generator() -> GeneratorConfig:
@@ -66,7 +94,13 @@ def _coverage_of(frame: pd.DataFrame, demand: DemandLookup, tag: str) -> tuple[i
     keys = list(zip(frame["series_id"], pd.to_datetime(frame["target_date"]), strict=True))
     known = [key in demand for key in keys]
     if not any(known):
-        return 0, 0
+        # Every forecast the replay scores targets a day of the generated panel. No match means
+        # the runtime forecast from somewhere else entirely, which is a failure to report, not a
+        # coverage of zero.
+        raise DemoError(
+            f"no generated demand for any of the {len(keys)} forecast rows "
+            f"(first target {keys[0][1].date() if keys else 'n/a'})"
+        )
     y = np.array([demand[key] for key, ok in zip(keys, known, strict=True) if ok])
     lower = frame.loc[known, f"lower_{tag}"].to_numpy()
     upper = frame.loc[known, f"upper_{tag}"].to_numpy()
@@ -166,7 +200,7 @@ def _pre_shift_backtest(pre: pd.DataFrame, training: TrainingConfig) -> Backtest
 def run_demo(workdir: Path) -> dict[str, JsonValue]:
     """Run the whole story end to end and return a JSON-serializable summary."""
     started = time.perf_counter()
-    workdir.mkdir(parents=True, exist_ok=True)
+    _prepare_workdir(workdir)
     generator = _demo_generator()
     full = generate_panel(generator)
     full_panel = Panel.from_frame(full, validate=False)
@@ -231,6 +265,8 @@ def run_demo(workdir: Path) -> dict[str, JsonValue]:
         "post_shift_days": _POST_DAYS,
         "static_coverage_80_post_shift": replay.static_coverage,
         "aci_coverage_80_post_shift": replay.aci_coverage,
+        "static_scored_post_shift": replay.static_n,
+        "aci_scored_post_shift": replay.aci_n,
         "aci_alpha_effective": calibration["alpha_effective"],
         "first_alarm_day_after_shift": replay.first_alarm_day,
         "proposals_opened": replay.proposals,
