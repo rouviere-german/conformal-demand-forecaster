@@ -221,7 +221,7 @@ scored over the following 200 days without retraining or recalibrating; 2.6s.
 | 95% | frozen split conformal | 0.9409 | **0.8038** | 29.75 |
 | 95% | ACI | 0.9381 | **0.9430** | 51.55 |
 
-The frozen calibration loses 11.5 and 15.1 points of coverage. ACI holds to within 1.0 and 0.7
+The frozen calibration ends 11.5 and 14.6 points below nominal. ACI holds to within 1.0 and 0.7
 points, and pays for it with roughly 1.4x and 1.7x the width. The shipped `gamma = 0.08` comes
 from the measured trade-off (`--sweep`), not from taste
 ([ADR 0003](docs/adr/0003-adaptive-conformal-inference.md)).
