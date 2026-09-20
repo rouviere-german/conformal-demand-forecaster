@@ -5,7 +5,9 @@ The service level objective is "empirical coverage within ``tolerance`` of nomin
 and misses. The alarm rule is a one-sided binomial test of the null hypothesis that the miss
 probability is at most ``alpha + tolerance``: with ``n`` observations and ``k`` misses in the
 window, ``p = P(K >= k | n, alpha + tolerance)``, and the alarm fires when ``p < significance``
-and ``n >= min_observations``. The tolerance keeps the test conservative under stationarity, and
+and ``n >= min_observations``. The window for day ``d`` is bounded on both sides --
+``d - window_days < day <= d`` -- so a day recorded out of order is counted on its own day and
+nowhere else. The tolerance keeps the test conservative under stationarity, and
 the significance level is chosen so that the family-wise false-alarm rate over many overlapping
 daily tests stays low (``bench/bench_monitor.py`` measures it over 500 stationary simulations).
 """
@@ -76,13 +78,36 @@ class CoverageMonitor:
             return
         window = self._counts.setdefault((segment, alpha), deque())
         window.append((day, n, misses))
-        cutoff = day - self.config.window_days
-        while window and window[0][0] <= cutoff:
-            window.popleft()
+        self._trim(window)
+
+    def _trim(self, window: deque[tuple[int, int, int]]) -> None:
+        """Drop days outside the retention span of the newest day this key has ever seen.
+
+        Days do not have to arrive in order: an actual can be backfilled behind the window's
+        leading edge, and an actual for a target date inside the forecast horizon arrives ahead
+        of it. Trimming is therefore relative to the largest day held rather than to the incoming
+        one, and keeps a whole extra window of slack, so that neither kind of out-of-order record
+        can evict days the live window still needs. ``status`` bounds the window on both sides,
+        so the retained surplus is never counted into an earlier day's test.
+        """
+        if not window:
+            return
+        cutoff = max(item[0] for item in window) - self.retention_days
+        if any(item[0] <= cutoff for item in window):
+            kept = [item for item in window if item[0] > cutoff]
+            window.clear()
+            window.extend(kept)
+
+    @property
+    def retention_days(self) -> int:
+        """How far back days are kept: the alarm window plus one window of out-of-order slack."""
+        return 2 * self.config.window_days
 
     def status(self, segment: str, alpha: float, day: int) -> MonitorStatus:
         cutoff = day - self.config.window_days
-        entries = [item for item in self._counts.get((segment, alpha), ()) if item[0] > cutoff]
+        entries = [
+            item for item in self._counts.get((segment, alpha), ()) if cutoff < item[0] <= day
+        ]
         n = sum(item[1] for item in entries)
         misses = sum(item[2] for item in entries)
         if n < self.config.min_observations:
@@ -111,7 +136,9 @@ class CoverageMonitor:
         monitor = cls(config)
         for key, entries in data.items():
             segment, _, alpha = key.rpartition("|")
-            monitor._counts[(segment, float(alpha))] = deque(
+            window: deque[tuple[int, int, int]] = deque(
                 (int(d), int(n), int(m)) for d, n, m in entries
             )
+            monitor._trim(window)
+            monitor._counts[(segment, float(alpha))] = window
         return monitor

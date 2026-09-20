@@ -198,3 +198,47 @@ def test_invalid_monitor_configurations_are_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         MonitorConfig(**kwargs)  # type: ignore[arg-type]
+
+
+# --- out-of-order days ------------------------------------------------------------------------
+# An actual can arrive for a day that is not the newest one: a backfill lands behind the window's
+# leading edge, and an ingest for a target date inside the forecast horizon lands ahead of it.
+# Neither may disturb the window the alarm rule is computed over.
+
+
+def test_a_forward_dated_record_does_not_evict_the_window() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=20, n=10, miss_rate=0.2)
+    before = monitor.status("smooth", ALPHA, last)
+    assert before.n == 200
+
+    monitor.record("smooth", ALPHA, last + 7, 20, 4)
+
+    after = monitor.status("smooth", ALPHA, last)
+    assert (after.n, after.misses) == (before.n, before.misses)
+
+
+def test_a_forward_dated_record_is_not_counted_before_its_day() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=20, n=10, miss_rate=0.2)
+    before = monitor.status("smooth", ALPHA, last)
+    monitor.record("smooth", ALPHA, last + 7, 20, 20)
+    assert monitor.status("smooth", ALPHA, last).misses == before.misses
+    assert monitor.status("smooth", ALPHA, last + 7).misses == before.misses + 20
+
+
+def test_a_backfilled_earlier_day_is_still_counted() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=20, n=10, miss_rate=0.2)
+    before = monitor.status("smooth", ALPHA, last)
+    monitor.record("smooth", ALPHA, last - 3, 10, 5)
+    after = monitor.status("smooth", ALPHA, last)
+    assert after.n == before.n + 10
+    assert after.misses == before.misses + 5
+
+
+def test_days_outside_the_retention_span_are_dropped() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    feed(monitor, days=200, n=10, miss_rate=0.2)
+    entries = monitor.to_dict()[f"smooth|{ALPHA:.4f}"]
+    assert len(entries) <= 2 * CONFIG.window_days
