@@ -171,3 +171,36 @@ def test_the_vectorised_form_clips_at_the_outer_columns() -> None:
 def test_the_vectorised_form_handles_the_median_only_case() -> None:
     orders = order_quantities(np.array([4.0, 9.0]), {}, 1.0, 4.0)
     assert orders.tolist() == [4.0, 9.0]
+
+
+# --- reporting a clipped fractile ---------------------------------------------------------------
+# The interpolation saturates at the outermost known quantile, so a cost ratio that implies a
+# fractile beyond it gets that bound back. The decision has to say so: the number is no longer the
+# fractile that was asked for.
+
+
+def test_a_fractile_inside_the_support_is_served_unchanged() -> None:
+    decision = order_quantity(7.0, INTERVALS, 1.0, 4.0)
+    assert decision.clipped is False
+    assert decision.fractile_served == pytest.approx(decision.fractile)
+
+
+def test_a_fractile_beyond_the_outermost_quantile_is_reported_as_clipped() -> None:
+    # stockout/holding = 999 implies a 0.999 fractile; the widest band here ends at 0.975.
+    decision = order_quantity(10.0, {0.05: (2.0, 20.0)}, 1.0, 999.0)
+    assert decision.fractile == pytest.approx(0.999)
+    assert decision.clipped is True
+    assert decision.fractile_served == pytest.approx(0.975)
+    assert decision.order == pytest.approx(20.0)
+
+
+def test_the_clipping_flag_turns_on_exactly_at_the_supported_cost_ratio() -> None:
+    # With a 95% band the outermost level is 0.975, reached at stockout/holding = 39.
+    assert order_quantity(10.0, {0.05: (2.0, 20.0)}, 1.0, 39.0).clipped is False
+    assert order_quantity(10.0, {0.05: (2.0, 20.0)}, 1.0, 39.1).clipped is True
+
+
+def test_a_fractile_below_the_lowest_quantile_is_also_reported() -> None:
+    decision = order_quantity(10.0, {0.05: (2.0, 20.0)}, 999.0, 1.0)
+    assert decision.clipped is True
+    assert decision.fractile_served == pytest.approx(0.025)

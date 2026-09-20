@@ -7,6 +7,9 @@ points of that distribution: the median and, for each coverage level, a lower an
 interpreted as the ``alpha/2`` and ``1 - alpha/2`` quantiles. The order is read off the piecewise
 linear interpolation of these points; fractiles beyond the outermost point are clipped to it,
 which the model card lists as a known approximation.
+
+A clipped order is not the critical fractile the costs asked for, so :class:`NewsvendorDecision`
+carries the fractile it was actually served at and a flag, and the serving layer reports both.
 """
 
 from __future__ import annotations
@@ -50,9 +53,19 @@ def interpolate_quantile(
 
 @dataclass(frozen=True, slots=True)
 class NewsvendorDecision:
+    """An order quantity and the fractile it was actually read off.
+
+    ``fractile`` is what the costs imply; ``fractile_served`` is where the known quantiles ran
+    out. They differ when ``clipped`` is true, and then the quantity is the outermost
+    conformalized bound rather than the requested critical fractile -- a number the caller must
+    not read as an interval at ``fractile``.
+    """
+
     fractile: float
     order: float
     order_units: int
+    fractile_served: float
+    clipped: bool
 
 
 def order_quantity(
@@ -71,7 +84,14 @@ def order_quantity(
         levels.extend([alpha / 2.0, 1.0 - alpha / 2.0])
         values.extend([lower, upper])
     order = max(0.0, interpolate_quantile(levels, values, fractile))
-    return NewsvendorDecision(fractile=fractile, order=order, order_units=int(np.ceil(order)))
+    served = min(max(fractile, min(levels)), max(levels))
+    return NewsvendorDecision(
+        fractile=fractile,
+        order=order,
+        order_units=int(np.ceil(order)),
+        fractile_served=served,
+        clipped=served != fractile,
+    )
 
 
 def order_quantities(
