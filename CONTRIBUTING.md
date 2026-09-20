@@ -35,16 +35,18 @@ uv sync --frozen
 
 - **Tests first for behavior.** Mark tests `unit` or `integration`. Use hypothesis for properties
   (invariants, round trips, oracles) rather than hand-picked examples alone.
-- **Offline by default.** Tests, demo and bench must not touch the network or need
-  `ANTHROPIC_API_KEY`; `tests/conftest.py` blocks non-loopback sockets. Use `FakeProvider` or
-  `ReplayProvider` for model behavior.
+- **Offline by default.** Tests, the demo and every bench must not touch the network;
+  `tests/conftest.py` blocks non-loopback sockets. Data comes from the seeded generator in
+  `src/conformal_demand_forecaster/data/generator.py`, never from a download.
 - **Evidence for claims.** A new README claim needs a row in `CLAIMS.md` pointing to a test,
   bench script or CI job. Performance numbers must be copied from real `bench/` output together
   with the command that produced them.
 - **Threat model.** New entry points, tools or artifacts need a STRIDE row in
   `docs/THREAT_MODEL.md` with a control and a test.
 - **Decisions.** Record significant trade-offs as ADRs in `docs/adr/`.
-- **No pickle.** Use JSON, npz with `allow_pickle=False`, safetensors or faiss `write_index`.
+- **No pickle.** Use JSON, npz with `allow_pickle=False`, or LightGBM's text format.
+- **Reproducibility.** Anything that changes forecasts must keep the backtest digest
+  reproducible and keep the run manifest (seed, dataset hash, params, lockfile) accurate.
 - **No secrets in git.** Configuration goes in `.env` (ignored); document new settings in
   `.env.example` (a test enforces that it lists every setting).
 - **Commits** follow [Conventional Commits](https://www.conventionalcommits.org/)
