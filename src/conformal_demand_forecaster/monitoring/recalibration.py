@@ -4,6 +4,12 @@ A coverage alarm opens a proposal (one pending proposal per segment and level). 
 can approve or reject it, and only an approved proposal can be applied, which promotes a new
 calibration version. Every transition is appended to the hash-chained audit log. Proposals live
 in a JSON file written atomically under a file lock.
+
+The JSON file is a projection, not the authority. It carries no integrity tag, so before any
+transition the workflow replays the audit chain for that proposal and requires the chain to agree
+with the state on disk. An edited file cannot resurrect a rejected proposal, reopen a decided one
+or introduce a proposal that was never proposed, and the applied entry names the approver the
+chain recorded rather than the one the file claims.
 """
 
 from __future__ import annotations
@@ -23,6 +29,13 @@ from conformal_demand_forecaster.monitoring.coverage import MonitorStatus
 __all__ = ["Proposal", "ProposalStatus", "RecalibrationWorkflow", "WorkflowError"]
 
 ProposalStatus = Literal["pending", "approved", "rejected", "applied"]
+
+_AUDITED_TRANSITIONS: dict[str, ProposalStatus] = {
+    "recalibration_proposed": "pending",
+    "recalibration_approved": "approved",
+    "recalibration_rejected": "rejected",
+    "recalibration_applied": "applied",
+}
 
 
 class WorkflowError(ValueError):
@@ -63,6 +76,40 @@ class RecalibrationWorkflow:
     def _write(self, proposals: dict[str, Proposal]) -> None:
         payload = {key: value.model_dump(mode="json") for key, value in sorted(proposals.items())}
         atomic_write_text(self.path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    def audited_state(self, proposal_id: str) -> tuple[ProposalStatus | None, str | None]:
+        """The status and deciding actor the audit chain records for ``proposal_id``.
+
+        Returns ``(None, None)`` when the chain never saw the proposal. A chain that does not
+        verify is refused outright: without it there is nothing to check the file against.
+        """
+        try:
+            entries = self.audit.entries()
+        except (ValueError, TypeError, KeyError) as exc:
+            raise WorkflowError(f"audit chain is unreadable: {exc}") from None
+        status: ProposalStatus | None = None
+        actor: str | None = None
+        for entry in entries:
+            action = _AUDITED_TRANSITIONS.get(entry.action)
+            if action is None:
+                continue
+            target = entry.data.get("proposal_id", entry.data.get("id"))
+            if target != proposal_id:
+                continue
+            status = action
+            if action in ("approved", "rejected"):
+                actor = entry.actor
+        return status, actor
+
+    def _require_agreement(self, proposal_id: str, current: Proposal) -> str | None:
+        """Refuse a transition when the stored status is not the one the chain last recorded."""
+        audited, actor = self.audited_state(proposal_id)
+        if audited != current.status:
+            raise WorkflowError(
+                f"proposal state {current.status!r} does not match the audit chain "
+                f"({audited or 'never proposed'})"
+            )
+        return actor
 
     def list(self, status: ProposalStatus | None = None) -> list[Proposal]:
         with file_lock(self.path):
@@ -115,6 +162,7 @@ class RecalibrationWorkflow:
             current = proposals.get(proposal_id)
             if current is None:
                 raise WorkflowError("unknown proposal")
+            self._require_agreement(proposal_id, current)
             if current.status != "pending":
                 raise WorkflowError(f"proposal is already {current.status}")
             decided = current.model_copy(
@@ -146,6 +194,7 @@ class RecalibrationWorkflow:
             current = proposals.get(proposal_id)
             if current is None:
                 raise WorkflowError("unknown proposal")
+            approved_by = self._require_agreement(proposal_id, current)
             if current.status != "approved":
                 raise WorkflowError("only an approved proposal can be applied")
             applied = current.model_copy(
@@ -157,8 +206,9 @@ class RecalibrationWorkflow:
             actor,
             "recalibration_applied",
             {
+                # The approver comes from the chain, not from the file the chain is checking.
                 "proposal_id": proposal_id,
-                "approved_by": current.decided_by,
+                "approved_by": approved_by,
                 "from_version": from_version,
                 "to_version": to_version,
             },

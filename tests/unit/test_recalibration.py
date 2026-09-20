@@ -214,3 +214,94 @@ def test_the_proposal_file_is_valid_json_on_disk(tmp_path: Path) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert set(payload) == {proposal.id}
     assert payload[proposal.id]["status"] == "pending"
+
+
+# --- the file is not the authority -------------------------------------------------------------
+# Every other artifact in the data directory is digest-verified on load. The proposal file is
+# plain JSON, so the gate takes the audit chain as the record of what was decided and refuses any
+# transition the chain does not support.
+
+
+def _rewrite(path: Path, proposal_id: str, **fields: object) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[proposal_id].update(fields)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def test_a_rejected_proposal_cannot_be_resurrected_by_editing_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "proposals.json"
+    workflow = RecalibrationWorkflow(path, AuditChain(tmp_path / "audit.jsonl"))
+    proposal = workflow.open(alarm())
+    assert proposal is not None
+    workflow.reject(proposal.id, "key:operator")
+
+    _rewrite(path, proposal.id, status="approved", decided_by="attacker")
+
+    with pytest.raises(WorkflowError, match="audit chain"):
+        workflow.mark_applied(proposal.id, "attacker", from_version="a" * 64, to_version="b" * 64)
+    assert workflow.get(proposal.id).status == "approved"  # the file still lies
+    assert [entry.action for entry in workflow.audit.entries()] == [
+        "recalibration_proposed",
+        "recalibration_rejected",
+    ]
+
+
+def test_a_decided_proposal_cannot_be_reset_to_pending_in_the_file(tmp_path: Path) -> None:
+    path = tmp_path / "proposals.json"
+    workflow = RecalibrationWorkflow(path, AuditChain(tmp_path / "audit.jsonl"))
+    proposal = workflow.open(alarm())
+    assert proposal is not None
+    workflow.reject(proposal.id, "key:operator")
+
+    _rewrite(path, proposal.id, status="pending", decided_by=None, decided_at=None)
+
+    with pytest.raises(WorkflowError, match="audit chain"):
+        workflow.approve(proposal.id, "attacker")
+
+
+def test_a_proposal_that_was_never_opened_cannot_be_decided(tmp_path: Path) -> None:
+    path = tmp_path / "proposals.json"
+    workflow = RecalibrationWorkflow(path, AuditChain(tmp_path / "audit.jsonl"))
+    proposal = workflow.open(alarm())
+    assert proposal is not None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    forged = dict(payload[proposal.id])
+    forged_id = "f" * 32
+    forged["id"] = forged_id
+    payload[forged_id] = forged
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(WorkflowError, match="audit chain"):
+        workflow.approve(forged_id, "attacker")
+
+
+def test_the_applied_entry_names_the_approver_from_the_chain(tmp_path: Path) -> None:
+    path = tmp_path / "proposals.json"
+    workflow = RecalibrationWorkflow(path, AuditChain(tmp_path / "audit.jsonl"))
+    proposal = workflow.open(alarm())
+    assert proposal is not None
+    workflow.approve(proposal.id, "key:operator")
+    _rewrite(path, proposal.id, decided_by="attacker")
+
+    applied = workflow.mark_applied(
+        proposal.id, "key:operator", from_version="a" * 64, to_version="b" * 64
+    )
+
+    assert applied.status == "applied"
+    entry = workflow.audit.entries()[-1]
+    assert entry.action == "recalibration_applied"
+    assert entry.data["approved_by"] == "key:operator"
+
+
+def test_a_broken_audit_chain_blocks_every_decision(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.jsonl"
+    path = tmp_path / "proposals.json"
+    workflow = RecalibrationWorkflow(path, AuditChain(audit_path))
+    proposal = workflow.open(alarm())
+    assert proposal is not None
+    audit_path.write_text(
+        audit_path.read_text(encoding="utf-8").replace('"pending"', '"approved"'),
+        encoding="utf-8",
+    )
+    with pytest.raises(WorkflowError, match="audit chain"):
+        workflow.approve(proposal.id, "key:operator")
