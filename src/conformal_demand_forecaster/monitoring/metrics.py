@@ -16,6 +16,7 @@ class ForecastMetrics:
     interval_width: Gauge
     alpha_effective: Gauge
     coverage_alarm_total: Counter
+    coverage_over_alarm_total: Counter
     forecast_freshness_seconds: Gauge
     feature_psi: Gauge
     actuals_accepted_total: Counter
@@ -53,6 +54,13 @@ def create_forecast_metrics(registry: CollectorRegistry, namespace: str = "app")
         coverage_alarm_total=Counter(
             "coverage_alarm_total",
             "Coverage monitor alarms (binomial test breaches).",
+            ["level", "segment"],
+            namespace=namespace,
+            registry=registry,
+        ),
+        coverage_over_alarm_total=Counter(
+            "coverage_over_alarm_total",
+            "Coverage monitor over-coverage findings (bands wider than the level asks for).",
             ["level", "segment"],
             namespace=namespace,
             registry=registry,

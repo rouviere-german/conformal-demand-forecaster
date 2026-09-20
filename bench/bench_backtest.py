@@ -15,7 +15,8 @@ What the table answers:
 
 - is the global gradient-boosted model actually better than seasonal-naive and ETS (MASE, and
   the M5 weighted scaled pinball loss over all five quantile levels)?
-- do the conformalized bands hit their nominal coverage, and at what width and Winkler score?
+- do the conformalized bands hit their nominal coverage, and at what width and Winkler score,
+  next to the model's own uncalibrated quantiles (the ``raw`` row)?
 - does Mondrian calibration close the per-segment coverage gap that a pooled band leaves?
 - does ordering from the conformalized quantiles beat ordering the point forecast, at the
   configured holding and stockout costs?
@@ -67,7 +68,7 @@ def derived(metrics: dict[str, float]) -> dict[str, float]:
     out = dict(metrics)
     for tag in ("80", "95"):
         nominal = 1.0 - (0.2 if tag == "80" else 0.05)
-        for method in ("mondrian", "pooled", "aci"):
+        for method in ("mondrian", "pooled", "aci", "raw"):
             out[f"coverage_error_{tag}_{method}"] = round(
                 abs(metrics[f"coverage_{tag}_{method}"] - nominal), 5
             )
@@ -117,7 +118,7 @@ def _calibration_table(m: dict[str, float]) -> str:
                 m[f"segment_gap_{tag}_{method}"],
             ]
             for tag in ("80", "95")
-            for method in ("mondrian", "pooled", "aci")
+            for method in ("mondrian", "pooled", "aci", "raw")
         ],
     )
 

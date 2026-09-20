@@ -280,7 +280,42 @@ def test_an_ingestor_can_post_actuals_and_gets_a_summary(
     body = response.json()
     assert body["received"] == len(panel.series_ids)
     assert body["accepted"] + body["quarantined"] == len(panel.series_ids)
+    assert body["duplicates"] == 0
+    assert body["over_coverage_alarms"] == []
     assert len(body["calibration_version"]) == 64
+
+
+def test_reposting_the_same_day_is_reported_and_changes_nothing(
+    service: tuple[TestClient, ForecastRuntime, Panel],
+) -> None:
+    client, runtime, panel = service
+    payload = actual_payload(panel)
+    first = client.post("/v1/actuals", json=payload, headers=INGESTOR).json()
+    assert first["accepted"] >= 1
+    stored = runtime.store.load_panel()["sales"].tolist()
+
+    replay = client.post("/v1/actuals", json=payload, headers=INGESTOR)
+
+    assert replay.status_code == 200
+    body = replay.json()
+    assert body["duplicates"] == first["accepted"]
+    assert body["accepted"] == 0
+    assert runtime.store.load_panel()["sales"].tolist() == stored
+
+
+def test_a_date_outside_the_serving_window_is_refused(
+    service: tuple[TestClient, ForecastRuntime, Panel],
+) -> None:
+    client, runtime, panel = service
+    payload = actual_payload(panel)
+    payload["records"] = payload["records"][:1]
+    payload["records"][0]["date"] = "2045-01-01"
+
+    response = client.post("/v1/actuals", json=payload, headers=INGESTOR)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "contract_violation"
+    assert runtime.panel.n_days == panel.n_days
 
 
 def test_a_poisoned_spike_is_quarantined_by_the_api_path(

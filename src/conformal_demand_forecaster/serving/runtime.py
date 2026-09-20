@@ -50,7 +50,11 @@ from conformal_demand_forecaster.ml.registry import ModelRegistry
 from conformal_demand_forecaster.ml.serialization import load_json, save_json
 from conformal_demand_forecaster.models.gbm import GbmConfig, QuantileGbm
 from conformal_demand_forecaster.monitoring.audit import AuditChain, verify_chain
-from conformal_demand_forecaster.monitoring.coverage import CoverageMonitor, MonitorConfig
+from conformal_demand_forecaster.monitoring.coverage import (
+    CoverageMonitor,
+    MonitorConfig,
+    MonitorStatus,
+)
 from conformal_demand_forecaster.monitoring.metrics import ForecastMetrics
 from conformal_demand_forecaster.monitoring.recalibration import (
     Proposal,
@@ -117,6 +121,7 @@ class IngestSummary(BaseModel):
     unknown_series: int
     scored: int
     alarms: list[str]
+    over_coverage_alarms: list[str]
     proposals_opened: list[str]
     calibration_version: str
 
@@ -585,7 +590,7 @@ class ForecastRuntime:
 
         accepted = self._screen(fresh, actor)
         scored, touched_days = self._score_accepted(accepted, artifact, training, segments)
-        alarms, opened = self._raise_alarms(touched_days, training)
+        alarms, opened, over_alarms = self._raise_alarms(touched_days, training)
 
         self.store.append_sales(
             [
@@ -611,6 +616,7 @@ class ForecastRuntime:
             unknown_series=unknown,
             scored=scored,
             alarms=alarms,
+            over_coverage_alarms=over_alarms,
             proposals_opened=opened,
             calibration_version=artifact.version,
         )
@@ -645,29 +651,41 @@ class ForecastRuntime:
 
     def _raise_alarms(
         self, touched_days: set[int], training: TrainingConfig
-    ) -> tuple[list[str], list[str]]:
-        """Evaluate the SLO on every day this ingest touched; open a proposal per fresh breach."""
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Evaluate the SLO on every day this ingest touched; open a proposal per fresh breach.
+
+        Only a breach opens a proposal. Over-coverage is reported and counted: it is holding
+        cost rather than a broken promise, so it is an operator's decision, not a gate.
+        """
         alarms: list[str] = []
+        over: list[str] = []
         opened: list[str] = []
         keys = [(segment, alpha) for segment in SEGMENTS for alpha in training.alphas]
         for day in sorted(touched_days):
             for check in self.monitor.evaluate(day, keys):
-                if check.alarm:
-                    alarms.append(f"{check.segment}@{_tag(check.alpha)}")
+                self._publish_status(check)
+                if check.over_alarm:
+                    over.append(f"{check.segment}@{_tag(check.alpha)}")
+                if not check.alarm:
+                    continue
+                alarms.append(f"{check.segment}@{_tag(check.alpha)}")
+                proposal = self.workflow.open(check)
+                if proposal is not None:
+                    opened.append(proposal.id)
                     if self.metrics is not None:
-                        self.metrics.coverage_alarm_total.labels(
-                            _tag(check.alpha), check.segment
-                        ).inc()
-                    proposal = self.workflow.open(check)
-                    if proposal is not None:
-                        opened.append(proposal.id)
-                        if self.metrics is not None:
-                            self.metrics.recalibration_proposals_total.labels("opened").inc()
-                if self.metrics is not None and check.n:
-                    self.metrics.rolling_coverage.labels(_tag(check.alpha), check.segment).set(
-                        check.coverage
-                    )
-        return sorted(set(alarms)), opened
+                        self.metrics.recalibration_proposals_total.labels("opened").inc()
+        return sorted(set(alarms)), opened, sorted(set(over))
+
+    def _publish_status(self, check: MonitorStatus) -> None:
+        if self.metrics is None:
+            return
+        tag = _tag(check.alpha)
+        if check.n:
+            self.metrics.rolling_coverage.labels(tag, check.segment).set(check.coverage)
+        if check.alarm:
+            self.metrics.coverage_alarm_total.labels(tag, check.segment).inc()
+        if check.over_alarm:
+            self.metrics.coverage_over_alarm_total.labels(tag, check.segment).inc()
 
     def _audit_duplicates(self, duplicates: Sequence[ActualRecord], actor: str) -> None:
         """Record an attempt to re-post days the panel already holds (values are not logged)."""

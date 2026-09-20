@@ -85,6 +85,9 @@
     "false_alarm_rate_per_run": {
       "max": 0.05
     },
+    "over_false_alarm_rate_per_run": {
+      "max": 0.05
+    },
     "detection_delay_median_days": {
       "max": 20
     },
@@ -92,6 +95,12 @@
       "max": 28
     },
     "undetected_rate": {
+      "max": 0.05
+    },
+    "over_detection_delay_median_days": {
+      "max": 20
+    },
+    "over_undetected_rate": {
       "max": 0.05
     },
     "seconds": {

@@ -7,7 +7,9 @@ same raw quantiles:
 - ``mondrian``: per (segment, horizon bucket) conformal quantiles at the nominal alpha;
 - ``pooled``: one conformal quantile per alpha over all groups (the non-Mondrian comparator);
 - ``aci``: Mondrian quantiles at the ACI-adjusted alpha, where the alpha state is updated once
-  per realized day between origins from that day's miss rate.
+  per realized day between origins from that day's miss rate;
+- ``raw``: the model's own quantile pair with no conformal step at all, which is what separates
+  "the conformal layer helped" from "the gradient-boosted model was already good".
 
 Baselines (seasonal naive, ETS) are scored on the same rows. Everything is scored against latent
 demand; the coverage against censored sales is reported separately.
@@ -52,7 +54,7 @@ from conformal_demand_forecaster.training import (
 __all__ = ["BacktestConfig", "BacktestResult", "run_backtest"]
 
 FloatArray = npt.NDArray[np.float64]
-METHODS = ("mondrian", "pooled", "aci")
+METHODS = ("mondrian", "pooled", "aci", "raw")
 # Metrics that measure the machine rather than the model; excluded from the digest.
 TIMING_METRICS = frozenset({"seconds"})
 
@@ -302,6 +304,10 @@ def _forecast_origin(
         for method, intervals in (("mondrian", mondrian), ("pooled", pooled), ("aci", adaptive)):
             columns[f"{method}_lower_{tag}"] = intervals.lower[alpha]
             columns[f"{method}_upper_{tag}"] = intervals.upper[alpha]
+        # The uncalibrated comparator: the same model quantiles the conformal step starts from.
+        lo_level, hi_level = ctx.calibrator.pairs[alpha]
+        columns[f"raw_lower_{tag}"] = prediction.column(lo_level)
+        columns[f"raw_upper_{tag}"] = prediction.column(hi_level)
         columns[f"aci_alpha_{tag}"] = adaptive.alpha_effective[alpha]
     columns.update(
         _baseline_columns(

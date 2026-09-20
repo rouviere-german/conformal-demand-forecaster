@@ -20,6 +20,7 @@ from conformal_demand_forecaster.monitoring.coverage import (
     CoverageMonitor,
     MonitorConfig,
     binomial_miss_pvalue,
+    binomial_over_coverage_pvalue,
 )
 
 pytestmark = pytest.mark.unit
@@ -242,3 +243,70 @@ def test_days_outside_the_retention_span_are_dropped() -> None:
     feed(monitor, days=200, n=10, miss_rate=0.2)
     entries = monitor.to_dict()[f"smooth|{ALPHA:.4f}"]
     assert len(entries) <= 2 * CONFIG.window_days
+
+
+# --- the over-coverage arm --------------------------------------------------------------------
+# Systematically wider intervals than the level asks for are not a broken promise, but they are
+# holding cost: the newsvendor layer orders off the same quantiles. The second arm reports them
+# without opening a recalibration proposal.
+
+
+def test_a_calibrated_stream_raises_neither_arm() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=40, n=40, miss_rate=ALPHA)
+    status = monitor.status("smooth", ALPHA, last)
+    assert status.alarm is False
+    assert status.over_alarm is False
+
+
+def test_intervals_that_never_miss_raise_the_over_coverage_arm() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=40, n=40, miss_rate=0.0)
+    status = monitor.status("smooth", ALPHA, last)
+    assert status.alarm is False
+    assert status.over_alarm is True
+    assert status.coverage == pytest.approx(1.0)
+
+
+def test_a_breach_does_not_raise_the_over_coverage_arm() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=40, n=40, miss_rate=0.45)
+    status = monitor.status("smooth", ALPHA, last)
+    assert status.alarm is True
+    assert status.over_alarm is False
+
+
+def test_the_over_coverage_arm_also_waits_for_enough_observations() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    monitor.record("smooth", ALPHA, 0, CONFIG.min_observations - 1, 0)
+    assert monitor.status("smooth", ALPHA, 0).over_alarm is False
+
+
+def test_the_over_coverage_arm_stays_valid_at_the_tight_level() -> None:
+    """At alpha = 0.05 a fixed 5-point tolerance would test against a zero miss probability."""
+    monitor = CoverageMonitor(CONFIG)
+    for day in range(40):
+        monitor.record("smooth", 0.05, day, 40, 2)
+    status = monitor.status("smooth", 0.05, 39)
+    assert 0.0 < status.over_p_value <= 1.0
+    assert status.over_alarm is False
+
+
+def test_evaluate_counts_both_arms() -> None:
+    monitor = CoverageMonitor(CONFIG)
+    last = feed(monitor, days=40, n=40, miss_rate=0.0)
+    monitor.evaluate(last, [("smooth", ALPHA)])
+    assert monitor.alarms_total == 0
+    assert monitor.over_alarms_total == 1
+
+
+def test_the_lower_tail_p_value_matches_the_binomial_cdf() -> None:
+    assert binomial_over_coverage_pvalue(2, 20, 0.2) == pytest.approx(float(binom.cdf(2, 20, 0.2)))
+    assert binomial_over_coverage_pvalue(20, 20, 0.2) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="need"):
+        binomial_over_coverage_pvalue(3, 2, 0.2)
+
+
+def test_an_invalid_over_tolerance_is_refused() -> None:
+    with pytest.raises(ValueError, match="over_tolerance"):
+        MonitorConfig(over_tolerance=0.0)

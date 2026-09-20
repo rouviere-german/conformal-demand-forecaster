@@ -1,11 +1,17 @@
 """Rolling-window coverage monitor with one-sided binomial alarms.
 
 The service level objective is "empirical coverage within ``tolerance`` of nominal over the last
-``window_days``". For each (segment, alpha) the monitor keeps daily counts of realized targets
-and misses. The alarm rule is a one-sided binomial test of the null hypothesis that the miss
-probability is at most ``alpha + tolerance``: with ``n`` observations and ``k`` misses in the
-window, ``p = P(K >= k | n, alpha + tolerance)``, and the alarm fires when ``p < significance``
-and ``n >= min_observations``. The window for day ``d`` is bounded on both sides --
+``window_days``". Two arms are tested. The breach arm is the SLO itself; the over-coverage arm
+tests the other tail, because intervals wider than the level asks for are not free either --
+they are holding cost, which the newsvendor layer prices. Only a breach opens a recalibration
+proposal; over-coverage is reported and counted.
+
+For each (segment, alpha) the monitor keeps daily counts of realized targets and misses. The
+alarm rule is a one-sided binomial test of the null hypothesis that the miss probability is at
+most ``alpha + tolerance``: with ``n`` observations and ``k`` misses in the window,
+``p = P(K >= k | n, alpha + tolerance)``, and the alarm fires when ``p < significance`` and
+``n >= min_observations``. The over-coverage arm is the same test on the lower tail against
+``max(alpha - over_tolerance, alpha / 2)``. The window for day ``d`` is bounded on both sides --
 ``d - window_days < day <= d`` -- so a day recorded out of order is counted on its own day and
 nowhere else. The tolerance keeps the test conservative under stationarity, and
 the significance level is chosen so that the family-wise false-alarm rate over many overlapping
@@ -20,16 +26,32 @@ from dataclasses import dataclass
 
 from scipy.stats import binom
 
-__all__ = ["CoverageMonitor", "MonitorConfig", "MonitorStatus", "binomial_miss_pvalue"]
+__all__ = [
+    "CoverageMonitor",
+    "MonitorConfig",
+    "MonitorStatus",
+    "binomial_miss_pvalue",
+    "binomial_over_coverage_pvalue",
+]
 
 
-def binomial_miss_pvalue(misses: int, n: int, miss_probability: float) -> float:
-    """``P(K >= misses)`` for ``K ~ Binomial(n, miss_probability)``."""
+def _check_arguments(misses: int, n: int, miss_probability: float) -> None:
     if n < 1 or not 0 <= misses <= n:
         raise ValueError("need 0 <= misses <= n and n >= 1")
     if not 0.0 < miss_probability < 1.0:
         raise ValueError("miss_probability must lie strictly inside (0, 1)")
+
+
+def binomial_miss_pvalue(misses: int, n: int, miss_probability: float) -> float:
+    """``P(K >= misses)`` for ``K ~ Binomial(n, miss_probability)``."""
+    _check_arguments(misses, n, miss_probability)
     return float(binom.sf(misses - 1, n, miss_probability))
+
+
+def binomial_over_coverage_pvalue(misses: int, n: int, miss_probability: float) -> float:
+    """``P(K <= misses)``: the other tail, for bands wider than the level asks for."""
+    _check_arguments(misses, n, miss_probability)
+    return float(binom.cdf(misses, n, miss_probability))
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +60,10 @@ class MonitorConfig:
     tolerance: float = 0.02
     significance: float = 0.01
     min_observations: int = 30
+    # Over-coverage is not an SLO breach, so its arm is deliberately looser than the breach
+    # tolerance: conformal bands are conservative by construction (the finite-sample
+    # 1/(n+1) slack alone over-covers), and only a sizeable surplus is worth reading.
+    over_tolerance: float = 0.05
 
     def __post_init__(self) -> None:
         if self.window_days < 1 or self.min_observations < 1:
@@ -46,6 +72,8 @@ class MonitorConfig:
             raise ValueError("tolerance must lie in [0, 0.5)")
         if not 0.0 < self.significance < 0.5:
             raise ValueError("significance must lie in (0, 0.5)")
+        if not 0.0 < self.over_tolerance < 0.5:
+            raise ValueError("over_tolerance must lie in (0, 0.5)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +85,8 @@ class MonitorStatus:
     misses: int
     p_value: float
     alarm: bool
+    over_p_value: float = 1.0
+    over_alarm: bool = False
 
     @property
     def coverage(self) -> float:
@@ -70,6 +100,7 @@ class CoverageMonitor:
         self.config = config or MonitorConfig()
         self._counts: dict[tuple[str, float], deque[tuple[int, int, int]]] = {}
         self.alarms_total = 0
+        self.over_alarms_total = 0
 
     def record(self, segment: str, alpha: float, day: int, n: int, misses: int) -> None:
         if n < 0 or not 0 <= misses <= n:
@@ -113,8 +144,22 @@ class CoverageMonitor:
         if n < self.config.min_observations:
             return MonitorStatus(segment, alpha, day, n, misses, 1.0, False)
         p_value = binomial_miss_pvalue(misses, n, min(alpha + self.config.tolerance, 0.999))
-        alarm = p_value < self.config.significance
-        return MonitorStatus(segment, alpha, day, n, misses, p_value, alarm)
+        # The over-coverage arm tests the opposite null: that the miss probability is at
+        # least ``alpha - over_tolerance``. The floor at ``alpha / 2`` keeps the reference
+        # probability inside (0, 1) at the tight levels, where a fixed tolerance runs past 0.
+        floor = max(alpha - self.config.over_tolerance, alpha / 2.0)
+        over_p_value = binomial_over_coverage_pvalue(misses, n, floor)
+        return MonitorStatus(
+            segment,
+            alpha,
+            day,
+            n,
+            misses,
+            p_value,
+            p_value < self.config.significance,
+            over_p_value,
+            over_p_value < self.config.significance,
+        )
 
     def evaluate(
         self, day: int, keys: Iterable[tuple[str, float]] | None = None
@@ -123,6 +168,7 @@ class CoverageMonitor:
         selected = list(keys) if keys is not None else sorted(self._counts)
         statuses = [self.status(segment, alpha, day) for segment, alpha in selected]
         self.alarms_total += sum(1 for item in statuses if item.alarm)
+        self.over_alarms_total += sum(1 for item in statuses if item.over_alarm)
         return statuses
 
     def to_dict(self) -> dict[str, list[list[int]]]:
