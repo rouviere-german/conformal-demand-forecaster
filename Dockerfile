@@ -25,13 +25,21 @@ RUN uv sync --frozen --no-dev --no-editable
 FROM ${PYTHON_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="conformal-demand-forecaster" \
       org.opencontainers.image.licenses="MIT"
+# LightGBM's wheel links against the OpenMP runtime, which python:3.12-slim does not ship;
+# without it `import lightgbm` dies with "libgomp.so.1: cannot open shared object file".
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin app
 COPY --from=builder /opt/venv /opt/venv
+# GIT_PYTHON_REFRESH=quiet: mlflow-skinny imports GitPython, which prints a multi-line warning
+# when no git binary is present. The image deliberately ships none, so silence the probe.
 ENV PATH="/opt/venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    GIT_PYTHON_REFRESH=quiet \
     APP_HOST=0.0.0.0 \
     APP_PORT=8000 \
     APP_DATA_DIR=/var/lib/forecaster

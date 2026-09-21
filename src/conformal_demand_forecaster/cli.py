@@ -30,7 +30,10 @@ def _serve(host: str | None, port: int | None) -> int:
     import uvicorn  # noqa: PLC0415 - only needed when serving
 
     from conformal_demand_forecaster.core.config import get_settings  # noqa: PLC0415
-    from conformal_demand_forecaster.core.logging import configure_logging  # noqa: PLC0415
+    from conformal_demand_forecaster.core.logging import (  # noqa: PLC0415
+        configure_logging,
+        get_logger,
+    )
     from conformal_demand_forecaster.core.tracing import (  # noqa: PLC0415
         install_global_tracer_provider,
     )
@@ -42,7 +45,17 @@ def _serve(host: str | None, port: int | None) -> int:
 
     settings = get_settings()
     configure_logging(settings.log_level, json_output=settings.log_json, stream=sys.stderr)
-    runtime = ForecastRuntime(settings, RuntimePaths(settings.data_dir)).load()
+    runtime = ForecastRuntime(settings, RuntimePaths(settings.data_dir))
+    if runtime.installed:
+        runtime.load()
+    else:
+        # A fresh container starts with an empty data directory. Serving anyway keeps /healthz
+        # (liveness) answering while /readyz reports not_ready, so the container comes up instead
+        # of crash-looping until `train` installs a runtime. A runtime that *is* installed but
+        # fails to verify still fails closed, inside load().
+        get_logger("conformal_demand_forecaster.cli").warning(
+            "serving_without_installed_runtime", data_dir=str(settings.data_dir)
+        )
     app = create_service_app(settings, runtime)
     install_global_tracer_provider(app.state.tracer_provider)
     uvicorn.run(

@@ -196,6 +196,47 @@ def test_serve_configures_uvicorn_safely(
     assert captured["access_log"] is False
 
 
+@pytest.mark.usefixtures("restore_logging")
+def test_serve_starts_without_an_installed_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh container starts on an empty data directory instead of crash-looping.
+
+    Liveness has to answer so the container reaches a running state; readiness is what reports
+    that no model is installed yet.
+    """
+    import uvicorn
+    from fastapi.testclient import TestClient
+
+    data_dir = tmp_path / "empty"
+    data_dir.mkdir()
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(app: object, **kwargs: Any) -> None:
+        captured.update(kwargs, app=app)
+
+    monkeypatch.setenv("APP_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr(tracing, "_installed", [])
+    monkeypatch.setattr(otel_trace, "set_tracer_provider", lambda provider: None)
+
+    from conformal_demand_forecaster.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["serve"]) == 0
+    finally:
+        get_settings.cache_clear()
+
+    with TestClient(captured["app"], raise_server_exceptions=False) as client:
+        assert client.get("/healthz").status_code == 200
+        readiness = client.get("/readyz")
+    assert readiness.status_code == 503
+    assert readiness.json()["checks"]["calibration_loaded"] == "fail"
+
+
 def test_an_unknown_command_exits_with_usage() -> None:
     with pytest.raises(SystemExit) as info:
         cli.main(["nonsense"])

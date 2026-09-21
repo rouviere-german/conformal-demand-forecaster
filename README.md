@@ -178,9 +178,14 @@ quantile beyond the outermost calibrated one (above 39:1 here, which saturates a
 bound), in which case `fractile_served` is the fractile the order was really read off. A forecast
 is only meaningful as the pair `(model_version, calibration_version)`.
 
-Containers: `docker compose up --build` runs the non-root, read-only image. The container build,
-smoke test, trivy scan and SBOM are verified in CI (`.github/workflows/ci.yml`, job `docker`);
-they were not run locally while building this repository.
+Containers: `docker compose up --build` runs the non-root, read-only image (uid 10001, `cap_drop:
+ALL`, `no-new-privileges`, one writable volume at `/var/lib/forecaster`). A fresh volume holds no
+model, so the service starts and answers `/healthz` while `/readyz` reports `not_ready`; run
+`docker compose run --rm app train --panel ... --data-dir /var/lib/forecaster` to install one.
+
+The build and the container smoke test were run locally on 2026-09-21 (linux/amd64, 917 MB image,
+HEALTHCHECK reached `healthy`). hadolint, the trivy scan and the syft SBOM run only in CI
+(`.github/workflows/ci.yml`, job `docker`) and were not run locally.
 
 ## Results
 
